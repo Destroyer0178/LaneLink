@@ -1,0 +1,14 @@
+{
+  "title": "Swim Workout Planner",
+  "description": "Create, organize, save, and export swim workouts.",
+  "language": "en",
+  "robots": {
+    "index": true
+  },
+  "icons": {
+    "icon": "/favicon.svg"
+  },
+  "accessibility": {
+    "addBypassLinks": true
+  }
+}
