@@ -455,7 +455,7 @@ const emptyWorkout = (): Workout => ({
   ],
 })
 
-function Icon({ name, size = 18 }: { name: string size?: number }) {
+function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const paths: Record<string, React.ReactNode> = {
     dashboard: (
       <>
@@ -913,7 +913,7 @@ function Sidebar({
   navigate: (page: Page) => void
   startNew: () => void
 }) {
-  const items: { page: Page label: string icon: string }[] = [
+  const items: { page: Page; label: string; icon: string }[] = [
     { page: "dashboard", label: "Dashboard", icon: "dashboard" },
     { page: "builder", label: "Workout Builder", icon: "builder" },
     { page: "workouts", label: "My Workouts", icon: "workouts" },
