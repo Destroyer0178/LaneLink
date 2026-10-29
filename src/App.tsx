@@ -1,37 +1,29 @@
 import { useEffect, useMemo, useState } from "react"
+import { extractDocx } from "./import/documentExtraction"
+import { ImportSourcePreview } from "./import/ImportSourcePreview"
+import { NestedSetSummary } from "./import/NestedSetSummary"
+import { parseWorkoutText } from "./import/parser"
+import type {
+  Category,
+  SetPiece,
+  Workout,
+  WorkoutSection,
+} from "./workout/types"
+import {
+  calculatePieceYardage,
+  calculateSectionYardage,
+  calculateWorkoutYardage,
+  resolvedYardageOrZero,
+} from "./workout/yardage"
 
 type Page = "dashboard" | "builder" | "workouts" | "library" | "account" | "preview" | "import"
-type Category = "Warmup" | "Drill" | "Main Set" | "Kick" | "Pull" | "Sprint" | "Cooldown"
-type Confidence = "verified" | "review" | "missing"
 type ImportStep = "upload" | "processing" | "review" | "save" | "success"
 
-type SetPiece = {
-  id: string
-  name: string
-  category: Category
-  instructions: string
-  repeats: number
-  distance: number
-  rest?: string
-  notes?: string
-  manualYardage?: number
-  confidence?: Confidence
-  confidenceNote?: string
-}
-
-type WorkoutSection = {
-  id: string
-  name: string
-  pieces: SetPiece[]
-}
-
-type Workout = {
-  id: string
-  title: string
-  description: string
-  created: string
-  modified: string
-  sections: WorkoutSection[]
+type ImportSource = {
+  filename: string
+  fileType: "DOCX" | "TEXT"
+  source: string
+  warnings: string[]
 }
 
 const categoryColors: Record<Category, string> = {
@@ -108,271 +100,37 @@ const seedPieces: SetPiece[] = [
   },
 ]
 
-const copyPiece = (piece: SetPiece): SetPiece => ({
-  ...piece,
-  id: `${piece.id}-${Date.now()}-${Math.random()}`,
-})
-const yardage = (piece: SetPiece) =>
-  piece.manualYardage ?? piece.repeats * piece.distance
-const sectionYardage = (section: WorkoutSection) =>
-  section.pieces.reduce((sum, piece) => sum + yardage(piece), 0)
-const workoutYardage = (workout: Workout) =>
-  workout.sections.reduce((sum, section) => sum + sectionYardage(section), 0)
+const copyPiece = (piece: SetPiece): SetPiece => {
+  const copy: SetPiece = JSON.parse(JSON.stringify(piece))
+  return {
+    ...copy,
+    id: `${piece.id}-${Date.now()}-${Math.random()}`,
+  }
+}
+const yardage = (piece: SetPiece) => resolvedYardageOrZero(piece)
+const sectionYardage = (section: WorkoutSection) => {
+  const result = calculateSectionYardage(section)
+  return result.status === "resolved"
+    ? result.yards
+    : section.pieces.reduce((sum, piece) => sum + yardage(piece), 0)
+}
+const workoutYardage = (workout: Workout) => {
+  const result = calculateWorkoutYardage(workout)
+  return result.status === "resolved"
+    ? result.yards
+    : workout.sections.reduce(
+        (sum, section) => sum + sectionYardage(section),
+        0,
+      )
+}
 const pieceCount = (workout: Workout) =>
   workout.sections.reduce((sum, section) => sum + section.pieces.length, 0)
 const formatYards = (value: number) => `${value.toLocaleString()} yd`
-const today = () => new Date().toISOString().slice(0, 10)
-
-type ImportScenario = {
-  filename: string
-  fileType: "DOCX" | "PDF" | "TEXT"
-  source: string
-  workout: Workout
+const pieceYardageLabel = (piece: SetPiece) => {
+  const result = calculatePieceYardage(piece)
+  return result.status === "resolved" ? formatYards(result.yards) : "Unresolved"
 }
-
-const importScenarios: ImportScenario[] = [
-  {
-    filename: "Tuesday_Practice.docx",
-    fileType: "DOCX",
-    source:
-      "Tuesday Practice\n\nWarmup:\n400 easy swim\n\nPre-Set:\n4 × 50 drill @ 1:00\n\nMain Set:\n8 × 100 freestyle @ 1:30\n\nCooldown:\n200 easy swim",
-    workout: {
-      id: "import-tuesday",
-      title: "Tuesday Practice",
-      description: "Imported from Tuesday_Practice.docx",
-      created: today(),
-      modified: today(),
-      sections: [
-        {
-          id: "is1",
-          name: "Warmup",
-          pieces: [
-            {
-              id: "ip1",
-              name: "400 Easy Swim",
-              category: "Warmup",
-              instructions: "400 easy swim",
-              repeats: 1,
-              distance: 400,
-              confidence: "verified",
-            },
-          ],
-        },
-        {
-          id: "is2",
-          name: "Pre-Set",
-          pieces: [
-            {
-              id: "ip2",
-              name: "Drill 50s",
-              category: "Drill",
-              instructions: "4 × 50 drill @ 1:00",
-              repeats: 4,
-              distance: 50,
-              rest: "@ 1:00",
-              confidence: "verified",
-            },
-          ],
-        },
-        {
-          id: "is3",
-          name: "Main Set",
-          pieces: [
-            {
-              id: "ip3",
-              name: "Freestyle 100s",
-              category: "Main Set",
-              instructions: "8 × 100 freestyle @ 1:30",
-              repeats: 8,
-              distance: 100,
-              rest: "@ 1:30",
-              confidence: "verified",
-            },
-          ],
-        },
-        {
-          id: "is4",
-          name: "Cooldown",
-          pieces: [
-            {
-              id: "ip4",
-              name: "200 Easy Swim",
-              category: "Cooldown",
-              instructions: "200 easy swim",
-              repeats: 1,
-              distance: 200,
-              confidence: "verified",
-            },
-          ],
-        },
-      ],
-    },
-  },
-  {
-    filename: "Advanced_Practice.docx",
-    fileType: "DOCX",
-    source:
-      "Advanced Practice\n\nWarmup: 400 swim\n\nMain Set: 3 rounds of 4 × 100 freestyle, with 200 easy between rounds.\n\nKick: 8 × 50\n\nCooldown: 200 easy",
-    workout: {
-      id: "import-advanced",
-      title: "Advanced Practice",
-      description:
-        "Imported workout — verify the repeated main set and kick details.",
-      created: today(),
-      modified: today(),
-      sections: [
-        {
-          id: "ia1",
-          name: "Warmup",
-          pieces: [
-            {
-              id: "iap1",
-              name: "400 Swim",
-              category: "Warmup",
-              instructions: "400 swim",
-              repeats: 1,
-              distance: 400,
-              confidence: "verified",
-            },
-          ],
-        },
-        {
-          id: "ia2",
-          name: "Main Set",
-          pieces: [
-            {
-              id: "iap2",
-              name: "Three-Round Freestyle Set",
-              category: "Main Set",
-              instructions:
-                "3 rounds of 4 × 100 freestyle, with 200 easy between rounds",
-              repeats: 1,
-              distance: 1600,
-              confidence: "review",
-              confidenceNote:
-                "Confirm whether recovery is completed after the final round.",
-            },
-          ],
-        },
-        {
-          id: "ia3",
-          name: "Kick",
-          pieces: [
-            {
-              id: "iap3",
-              name: "Kick 50s",
-              category: "Kick",
-              instructions: "8 × 50",
-              repeats: 8,
-              distance: 50,
-              confidence: "review",
-              confidenceNote: "Kick stroke and equipment were not specified.",
-            },
-          ],
-        },
-        {
-          id: "ia4",
-          name: "Cooldown",
-          pieces: [
-            {
-              id: "iap4",
-              name: "200 Easy",
-              category: "Cooldown",
-              instructions: "200 easy",
-              repeats: 1,
-              distance: 200,
-              confidence: "verified",
-            },
-          ],
-        },
-      ],
-    },
-  },
-  {
-    filename: "Practice_Notes.pdf",
-    fileType: "PDF",
-    source:
-      "Practice notes — Senior group\n\n• Easy 300, choice stroke\n• 6 x 50 build to fast on :55\nThen pull with paddles — 3 rounds, 200 steady\n• Fast 25s from a push, eight total\nFinish with easy swimming, about 200",
-    workout: {
-      id: "import-notes",
-      title: "Senior Group Practice Notes",
-      description:
-        "Sections were suggested from an unstructured source document.",
-      created: today(),
-      modified: today(),
-      sections: [
-        {
-          id: "in1",
-          name: "Suggested Warmup",
-          pieces: [
-            {
-              id: "inp1",
-              name: "Easy Choice",
-              category: "Warmup",
-              instructions: "Easy 300, choice stroke",
-              repeats: 1,
-              distance: 300,
-              confidence: "review",
-              confidenceNote: "Confirm suggested section assignment.",
-            },
-            {
-              id: "inp2",
-              name: "Build 50s",
-              category: "Drill",
-              instructions: "6 × 50 build to fast on :55",
-              repeats: 6,
-              distance: 50,
-              rest: "@ :55",
-              confidence: "verified",
-            },
-          ],
-        },
-        {
-          id: "in2",
-          name: "Suggested Main Set",
-          pieces: [
-            {
-              id: "inp3",
-              name: "Steady Pull",
-              category: "Pull",
-              instructions: "Then pull with paddles — 3 rounds, 200 steady",
-              repeats: 3,
-              distance: 200,
-              notes: "Paddles",
-              confidence: "review",
-              confidenceNote: "Confirm whether each round contains one 200.",
-            },
-            {
-              id: "inp4",
-              name: "Fast 25s",
-              category: "Sprint",
-              instructions: "Fast 25s from a push, eight total",
-              repeats: 8,
-              distance: 25,
-              confidence: "verified",
-            },
-          ],
-        },
-        {
-          id: "in3",
-          name: "Suggested Cooldown",
-          pieces: [
-            {
-              id: "inp5",
-              name: "Easy Swimming",
-              category: "Cooldown",
-              instructions: "Finish with easy swimming, about 200",
-              repeats: 1,
-              distance: 0,
-              confidence: "missing",
-              confidenceNote: "Confirm distance before saving.",
-            },
-          ],
-        },
-      ],
-    },
-  },
-]
+const today = () => new Date().toISOString().slice(0, 10)
 
 const seedWorkouts: Workout[] = [
   {
@@ -677,12 +435,10 @@ function App() {
   })
   const [current, setCurrent] = useState<Workout>(() => emptyWorkout())
   const [importStep, setImportStep] = useState<ImportStep>("upload")
-  const [importScenario, setImportScenario] = useState<ImportScenario | null>(
+  const [importScenario, setImportScenario] = useState<ImportSource | null>(
     null,
   )
-  const [importDraft, setImportDraft] = useState<Workout>(() =>
-    JSON.parse(JSON.stringify(importScenarios[0].workout)),
-  )
+  const [importDraft, setImportDraft] = useState<Workout>(() => emptyWorkout())
   const [savedImport, setSavedImport] = useState<Workout | null>(null)
   const [savedLibraryCount, setSavedLibraryCount] = useState(0)
   const [importPrompt, setImportPrompt] = useState(false)
@@ -1174,6 +930,13 @@ function Builder({
   navigate: (p: Page) => void
   beginImport: () => void
 }) {
+  const [draggedPiece, setDraggedPiece] = useState<{
+    source: "library" | "workout"
+    piece: SetPiece
+    sectionId?: string
+    index?: number
+  } | null>(null)
+  const [dragOverSection, setDragOverSection] = useState<string | null>(null)
   const categories: ("All" | Category)[] = [
     "All",
     "Warmup",
@@ -1246,6 +1009,57 @@ function Builder({
           : section,
       ),
     })
+  const deleteSection = (section: WorkoutSection) => {
+    if (
+      section.pieces.length > 0 &&
+      !window.confirm(
+        `Delete “${section.name}” and its ${section.pieces.length} set piece${
+          section.pieces.length === 1 ? "" : "s"
+        }?`,
+      )
+    ) {
+      return
+    }
+    setCurrent({
+      ...current,
+      sections: current.sections.filter((item) => item.id !== section.id),
+    })
+  }
+  const dropPiece = (targetSectionId: string, targetIndex?: number) => {
+    if (!draggedPiece) return
+    const pieceToInsert =
+      draggedPiece.source === "library"
+        ? copyPiece(draggedPiece.piece)
+        : draggedPiece.piece
+    let nextSections = current.sections.map((section) =>
+      draggedPiece.source === "workout" && section.id === draggedPiece.sectionId
+        ? {
+            ...section,
+            pieces: section.pieces.filter(
+              (piece) => piece.id !== draggedPiece.piece.id,
+            ),
+          }
+        : { ...section, pieces: [...section.pieces] },
+    )
+    nextSections = nextSections.map((section) => {
+      if (section.id !== targetSectionId) return section
+      const nextPieces = [...section.pieces]
+      let insertAt = targetIndex ?? nextPieces.length
+      if (
+        draggedPiece.source === "workout" &&
+        draggedPiece.sectionId === targetSectionId &&
+        draggedPiece.index !== undefined &&
+        draggedPiece.index < insertAt
+      ) {
+        insertAt -= 1
+      }
+      nextPieces.splice(Math.max(0, insertAt), 0, pieceToInsert)
+      return { ...section, pieces: nextPieces }
+    })
+    setCurrent({ ...current, sections: nextSections })
+    setDraggedPiece(null)
+    setDragOverSection(null)
+  }
 
   return (
     <div className="builder-page">
@@ -1302,6 +1116,10 @@ function Builder({
               Create Piece
             </Button>
           </div>
+          <div className="drag-helper">
+            <Icon name="grip" size={16} />
+            Drag any set piece into the section where you want it.
+          </div>
           <label className="search-box">
             <Icon name="search" />
             <Field
@@ -1323,7 +1141,19 @@ function Builder({
           </div>
           <div className="piece-list">
             {filtered.map((piece) => (
-              <article className="piece-card" key={piece.id}>
+              <article
+                className="piece-card draggable-piece"
+                key={piece.id}
+                draggable
+                onDragStart={(event) => {
+                  event.dataTransfer.effectAllowed = "copy"
+                  setDraggedPiece({ source: "library", piece })
+                }}
+                onDragEnd={() => {
+                  setDraggedPiece(null)
+                  setDragOverSection(null)
+                }}
+              >
                 <div className="piece-card-top">
                   <Badge category={piece.category} />
                   <strong>{formatYards(yardage(piece))}</strong>
@@ -1362,7 +1192,22 @@ function Builder({
           </div>
           <div className="section-stack">
             {current.sections.map((section) => (
-              <article className="workout-section" key={section.id}>
+              <article
+                className={`workout-section ${
+                  dragOverSection === section.id ? "drag-over" : ""
+                }`}
+                key={section.id}
+                onDragOver={(event) => {
+                  event.preventDefault()
+                  event.dataTransfer.dropEffect =
+                    draggedPiece?.source === "library" ? "copy" : "move"
+                  setDragOverSection(section.id)
+                }}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  dropPiece(section.id)
+                }}
+              >
                 <header>
                   <div>
                     <input
@@ -1380,7 +1225,16 @@ function Builder({
                     />
                     <span>{section.pieces.length} pieces</span>
                   </div>
-                  <strong>{formatYards(sectionYardage(section))}</strong>
+                  <div className="section-header-actions">
+                    <strong>{formatYards(sectionYardage(section))}</strong>
+                    <button
+                      className="delete-section-button"
+                      title={`Delete ${section.name} section`}
+                      onClick={() => deleteSection(section)}
+                    >
+                      <Icon name="trash" size={16} />
+                    </button>
+                  </div>
                 </header>
                 <div className="section-pieces">
                   {section.pieces.length === 0 ? (
@@ -1391,12 +1245,40 @@ function Builder({
                       }
                     >
                       <Icon name="plus" />
-                      <span>Add a piece to {section.name}</span>
+                      <span>Drop a set piece here or create one</span>
                     </button>
                   ) : (
                     section.pieces.map((piece, index) => (
-                      <div className="workout-piece" key={piece.id}>
-                        <span className="grip">
+                      <div
+                        className="workout-piece"
+                        key={piece.id}
+                        draggable
+                        onDragStart={(event) => {
+                          event.stopPropagation()
+                          event.dataTransfer.effectAllowed = "move"
+                          setDraggedPiece({
+                            source: "workout",
+                            piece,
+                            sectionId: section.id,
+                            index,
+                          })
+                        }}
+                        onDragOver={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          setDragOverSection(section.id)
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault()
+                          event.stopPropagation()
+                          dropPiece(section.id, index)
+                        }}
+                        onDragEnd={() => {
+                          setDraggedPiece(null)
+                          setDragOverSection(null)
+                        }}
+                      >
+                        <span className="grip" title="Drag to move this piece">
                           <Icon name="grip" />
                         </span>
                         <div className="piece-order">
@@ -1448,7 +1330,7 @@ function Builder({
                             <Icon name="duplicate" size={16} />
                           </button>
                           <button
-                            title="Remove"
+                            title="Delete set piece"
                             onClick={() => removePiece(section.id, piece.id)}
                           >
                             <Icon name="trash" size={16} />
@@ -1528,15 +1410,14 @@ function PieceModal({
   const [saveToLibrary, setSaveToLibrary] = useState(
     modal.libraryOnly ?? !modal.piece,
   )
+  const draftYardage = calculatePieceYardage(draft)
   const save = () => {
     if (!draft.name.trim()) return
     const finalDraft: SetPiece = {
       ...draft,
-      confidence: yardage(draft) > 0 ? "verified" : "missing",
+      confidence: draftYardage.status === "resolved" ? "verified" : "missing",
       confidenceNote:
-        yardage(draft) > 0
-          ? undefined
-          : "Yardage could not be calculated automatically.",
+        draftYardage.status === "resolved" ? undefined : draftYardage.reason,
     }
     if (modal.piece && modal.sectionId) {
       setCurrent({
@@ -1680,6 +1561,32 @@ function PieceModal({
               </div>
             </label>
             <label className="form-label">
+              <span>Distance unit</span>
+              <select
+                value={draft.unit ?? "yards"}
+                onChange={(event) =>
+                  setDraft({
+                    ...draft,
+                    unit: event.target.value as "yards" | "meters" | "unknown",
+                    children: draft.children?.map((piece) => ({
+                      ...piece,
+                      unit: event.target
+                        .value as "yards" | "meters" | "unknown",
+                    })),
+                    betweenRounds: draft.betweenRounds?.map((piece) => ({
+                      ...piece,
+                      unit: event.target
+                        .value as "yards" | "meters" | "unknown",
+                    })),
+                  })
+                }
+              >
+                <option value="yards">Yards</option>
+                <option value="meters">Meters</option>
+                <option value="unknown">Unknown</option>
+              </select>
+            </label>
+            <label className="form-label">
               <span>Rest / interval</span>
               <Field
                 value={draft.rest ?? ""}
@@ -1702,10 +1609,16 @@ function PieceModal({
             <div>
               <span>Calculated yardage</span>
               <small>
-                {draft.repeats} repeats × {draft.distance} yards
+                {draft.kind === "rounds"
+                  ? `${draft.rounds} rounds with ${draft.children?.length ?? 0} nested set(s)`
+                  : `${draft.repeats} repeats × ${draft.distance} ${draft.unit ?? "yards"}`}
               </small>
             </div>
-            <strong>{formatYards(yardage(draft))}</strong>
+            <strong>
+              {draftYardage.status === "resolved"
+                ? formatYards(draftYardage.yards)
+                : "Unresolved"}
+            </strong>
           </div>
           {!modal.libraryOnly && (
             <label className="toggle-row">
@@ -2162,8 +2075,8 @@ function ImportWorkflow({
 }: {
   step: ImportStep
   setStep: (step: ImportStep) => void
-  scenario: ImportScenario | null
-  setScenario: (scenario: ImportScenario | null) => void
+  scenario: ImportSource | null
+  setScenario: (scenario: ImportSource | null) => void
   draft: Workout
   setDraft: React.Dispatch<React.SetStateAction<Workout>>
   setModal: React.Dispatch<React.SetStateAction<{
@@ -2185,8 +2098,9 @@ function ImportWorkflow({
 }) {
   const [processingStage, setProcessingStage] = useState(0)
   const [pasteOpen, setPasteOpen] = useState(false)
-  const [pasteText, setPasteText] = useState(importScenarios[0].source)
+  const [pasteText, setPasteText] = useState("")
   const [uploadError, setUploadError] = useState("")
+  const [isExtracting, setIsExtracting] = useState(false)
   const [selectedTemplates, setSelectedTemplates] = useState<string[]>([])
   const [saveTemplates, setSaveTemplates] = useState(true)
 
@@ -2194,9 +2108,9 @@ function ImportWorkflow({
     if (step !== "processing") return
     setProcessingStage(0)
     const timers = [1, 2, 3, 4].map((stage, index) =>
-      window.setTimeout(() => setProcessingStage(stage), 450 * (index + 1)),
+      window.setTimeout(() => setProcessingStage(stage), 260 * (index + 1)),
     )
-    const finish = window.setTimeout(() => setStep("review"), 2400)
+    const finish = window.setTimeout(() => setStep("review"), 1500)
     return () => {
       timers.forEach(window.clearTimeout)
       window.clearTimeout(finish)
@@ -2215,13 +2129,7 @@ function ImportWorkflow({
     }
   }, [step, draft, selectedTemplates.length])
 
-  const chooseScenario = (item: ImportScenario) => {
-    setScenario(item)
-    setDraft(JSON.parse(JSON.stringify(item.workout)))
-    setUploadError("")
-  }
-
-  const handleFile = (file?: File) => {
+  const handleFile = async (file?: File) => {
     if (!file) return
     if (file.size > 10 * 1024 * 1024) {
       setScenario(null)
@@ -2231,47 +2139,54 @@ function ImportWorkflow({
       return
     }
     const extension = file.name.split(".").pop()?.toLowerCase()
-    if (extension !== "docx" && extension !== "pdf") {
+    if (extension !== "docx") {
       setScenario(null)
       setUploadError(
-        "This file type is not supported. Choose a .docx or .pdf file.",
+        "Only .docx files are currently supported. PDF support is not yet available.",
       )
       return
     }
-    const exact = importScenarios.find(
-      (item) => item.filename.toLowerCase() === file.name.toLowerCase(),
-    )
-    const fallback = importScenarios[2]
-    chooseScenario(
-      exact ?? {
-        ...fallback,
-        filename: file.name,
-        fileType: extension === "pdf" ? "PDF" : "DOCX",
-        source: `Prototype simulation for ${file.name}\n\nThis environment cannot read arbitrary document contents. The unstructured Practice Notes sample will be used to demonstrate the review workflow.`,
-      },
-    )
+    setIsExtracting(true)
+    setUploadError("")
+    try {
+      const extracted = await extractDocx(file)
+      setScenario({
+        filename: extracted.filename,
+        fileType: "DOCX",
+        source: extracted.text,
+        warnings: extracted.warnings,
+      })
+    } catch (error) {
+      setScenario(null)
+      setUploadError(
+        error instanceof Error
+          ? error.message
+          : "The document could not be read.",
+      )
+    } finally {
+      setIsExtracting(false)
+    }
   }
 
   const startConversion = () => {
     if (!scenario) return
-    setDraft(JSON.parse(JSON.stringify(scenario.workout)))
+    const parsed = parseWorkoutText(scenario.source, {
+      filename: scenario.filename,
+    })
+    setDraft(parsed.workout)
     setStep("processing")
   }
 
   const convertPastedText = () => {
-    const pasted: ImportScenario = {
-      ...importScenarios[0],
+    if (!pasteText.trim()) return
+    const pasted: ImportSource = {
       filename: "Pasted workout text",
       fileType: "TEXT",
       source: pasteText,
-      workout: {
-        ...JSON.parse(JSON.stringify(importScenarios[0].workout)),
-        id: `import-text-${Date.now()}`,
-        description:
-          "Converted from pasted text using the prototype sample interpretation.",
-      },
+      warnings: [],
     }
-    chooseScenario(pasted)
+    setScenario(pasted)
+    setDraft(parseWorkoutText(pasteText).workout)
     setPasteOpen(false)
     setStep("processing")
   }
@@ -2344,11 +2259,13 @@ function ImportWorkflow({
   const unresolved = draft.sections
     .flatMap((section) => section.pieces)
     .filter((piece) => piece.confidence !== "verified")
-  const incomplete = unresolved.some(
-    (piece) => piece.confidence === "missing" && yardage(piece) === 0,
-  )
+  const incomplete = calculateWorkoutYardage(draft).status === "unresolved"
 
   const saveImportedWorkout = () => {
+    if (calculateWorkoutYardage(draft).status === "unresolved") {
+      setStep("review")
+      return
+    }
     const approved: Workout = {
       ...JSON.parse(JSON.stringify(draft)),
       id: `w-import-${Date.now()}`,
@@ -2362,10 +2279,13 @@ function ImportWorkflow({
       ? approved.sections
           .flatMap((section) => section.pieces)
           .filter((piece) => selectedTemplates.includes(piece.id))
-          .map((piece) => ({
-            ...piece,
-            id: `p-import-${Date.now()}-${Math.random()}`,
-          }))
+          .map((piece) => {
+            const template: SetPiece = JSON.parse(JSON.stringify(piece))
+            return {
+              ...template,
+              id: `p-import-${Date.now()}-${Math.random()}`,
+            }
+          })
       : []
     setWorkouts([approved, ...workouts])
     if (selected.length) setPieces([...selected, ...pieces])
@@ -2396,16 +2316,24 @@ function ImportWorkflow({
           >
             <input
               type="file"
-              accept=".docx,.pdf"
+              accept=".docx"
               onChange={(event) => handleFile(event.target.files?.[0])}
             />
             <span className="upload-icon">
               <Icon name="upload" size={28} />
             </span>
-            <h2>Drag and drop your workout here</h2>
-            <p>or select a document from your computer</p>
+            <h2>
+              {isExtracting
+                ? "Reading document..."
+                : "Drag and drop your workout here"}
+            </h2>
+            <p>
+              {isExtracting
+                ? "Mammoth is extracting the Word document text."
+                : "or select a document from your computer"}
+            </p>
             <span className="browse-button">Browse Files</span>
-            <small>Supported formats: .docx and .pdf · Maximum 10 MB</small>
+            <small>Supported format: .docx · Maximum 10 MB</small>
           </label>
           {uploadError && (
             <div className="import-error">
@@ -2414,14 +2342,28 @@ function ImportWorkflow({
             </div>
           )}
           {scenario && (
-            <div className="selected-file">
-              <span className="file-type">{scenario.fileType}</span>
-              <div>
-                <strong>{scenario.filename}</strong>
-                <span>Ready to import · Prototype sample conversion</span>
+            <>
+              <div className="selected-file">
+                <span className="file-type">{scenario.fileType}</span>
+                <div>
+                  <strong>{scenario.filename}</strong>
+                  <span>
+                    Text extracted · {scenario.source.split("\n").length} lines
+                  </span>
+                </div>
+                <button onClick={() => setScenario(null)}>Remove File</button>
               </div>
-              <button onClick={() => setScenario(null)}>Remove File</button>
-            </div>
+              {scenario.warnings.length > 0 && (
+                <div className="document-warnings">
+                  <Icon name="alert" size={16} />
+                  <span>
+                    Mammoth reported {scenario.warnings.length} document warning
+                    {scenario.warnings.length === 1 ? "" : "s"}. Review the
+                    extracted text carefully.
+                  </span>
+                </div>
+              )}
+            </>
           )}
           <div className="import-divider">
             <span>or</span>
@@ -2436,38 +2378,6 @@ function ImportWorkflow({
             </div>
             <Icon name="chevron" />
           </button>
-          <div className="sample-documents">
-            <div>
-              <h3>Try a sample document</h3>
-              <p>Sample files use predefined conversions for this prototype.</p>
-            </div>
-            <div className="sample-grid">
-              {importScenarios.map((item) => (
-                <button
-                  key={item.filename}
-                  className={
-                    scenario?.filename === item.filename ? "selected" : ""
-                  }
-                  onClick={() => chooseScenario(item)}
-                >
-                  <span className="file-type">{item.fileType}</span>
-                  <span>
-                    <strong>{item.filename}</strong>
-                    <small>
-                      {item === importScenarios[0]
-                        ? "Clean sections"
-                        : item === importScenarios[1]
-                          ? "Ambiguous details"
-                          : "Unstructured notes"}
-                    </small>
-                  </span>
-                  {scenario?.filename === item.filename && (
-                    <Icon name="check" size={16} />
-                  )}
-                </button>
-              ))}
-            </div>
-          </div>
           <div className="import-actions">
             <Button variant="ghost" onClick={() => navigate("dashboard")}>
               Cancel
@@ -2475,7 +2385,7 @@ function ImportWorkflow({
             <Button
               icon="chevron"
               onClick={startConversion}
-              className={!scenario ? "button-disabled" : ""}
+              className={!scenario || isExtracting ? "button-disabled" : ""}
             >
               Continue to Import
             </Button>
@@ -2495,13 +2405,16 @@ function ImportWorkflow({
               </div>
               <div className="paste-body">
                 <p>
-                  Paste a complete workout below. This prototype demonstrates
-                  conversion using the Tuesday Practice sample structure.
+                  Paste a complete workout below. The same rule-based parser
+                  used for Word documents will convert the text.
                 </p>
                 <textarea
                   rows={14}
                   value={pasteText}
                   onChange={(event) => setPasteText(event.target.value)}
+                  placeholder={
+                    "Tuesday Practice\n\nWarmup:\n400 yd easy swim\n\nMain Set:\n8 x 100 yd freestyle @ 1:30\n\nCooldown:\n200 yd easy"
+                  }
                 />
               </div>
               <div className="modal-footer">
@@ -2568,9 +2481,7 @@ function ImportWorkflow({
               </div>
             ))}
           </div>
-          <small>
-            Prototype conversion uses predefined data for the selected sample.
-          </small>
+          <small>Conversion is deterministic and rule-based.</small>
         </div>
       </div>
     )
@@ -2589,30 +2500,23 @@ function ImportWorkflow({
             <Button variant="ghost" onClick={() => setStep("upload")}>
               Start Over
             </Button>
-            <Button onClick={() => setStep("save")}>Continue to Save</Button>
+            <Button
+              onClick={() => setStep("save")}
+              className={incomplete ? "button-disabled" : ""}
+            >
+              Continue to Save
+            </Button>
           </div>
         </div>
         <div className="review-layout">
-          <aside className="source-column">
-            <div className="source-heading">
-              <div>
-                <span>Original Workout</span>
-                <strong>{scenario?.filename}</strong>
-              </div>
-              <span className="file-type">{scenario?.fileType}</span>
-            </div>
-            <div className="source-preview">
-              <span className="source-label">EXTRACTED SOURCE TEXT</span>
-              <pre>{scenario?.source}</pre>
-            </div>
-            <div className="prototype-note">
-              <Icon name="alert" size={16} />
-              <p>
-                This preview uses sample text. Review each converted item
-                against the original before saving.
-              </p>
-            </div>
-          </aside>
+          {scenario && (
+            <ImportSourcePreview
+              filename={scenario.filename}
+              fileType={scenario.fileType}
+              source={scenario.source}
+              alertIcon={<Icon name="alert" size={16} />}
+            />
+          )}
           <section className="converted-column">
             <div className="converted-summary">
               <div className="import-title-fields">
@@ -2731,20 +2635,34 @@ function ImportWorkflow({
                           </div>
                           <p>{piece.instructions}</p>
                           <div className="import-piece-meta">
-                            <span>
-                              {piece.repeats} × {piece.distance} yd
-                            </span>
+                            {piece.kind === "rounds" ? (
+                              <span>
+                                {piece.rounds} rounds ·{" "}
+                                {piece.children?.length ?? 0} nested set
+                                {(piece.children?.length ?? 0) === 1 ? "" : "s"}
+                              </span>
+                            ) : (
+                              <span>
+                                {piece.repeats} × {piece.distance}{" "}
+                                {piece.unit === "yards"
+                                  ? "yd"
+                                  : piece.unit === "meters"
+                                    ? "m"
+                                    : "unit unknown"}
+                              </span>
+                            )}
                             {piece.rest && <span>{piece.rest}</span>}
-                            {piece.notes && <span>{piece.notes}</span>}
+                            {piece.equipment?.map((item) => (
+                              <span key={item}>{item}</span>
+                            ))}
                           </div>
+                          <NestedSetSummary piece={piece} />
                           {piece.confidenceNote && (
                             <small>{piece.confidenceNote}</small>
                           )}
                         </div>
                         <strong className="import-piece-yards">
-                          {yardage(piece) > 0
-                            ? formatYards(yardage(piece))
-                            : "Unresolved"}
+                          {pieceYardageLabel(piece)}
                         </strong>
                         <div className="import-piece-controls">
                           <select
@@ -2839,7 +2757,12 @@ function ImportWorkflow({
                   ? "Resolve missing yardage before relying on the total."
                   : "All calculated yardage is included in the total."}
               </span>
-              <Button onClick={() => setStep("save")}>Continue to Save</Button>
+              <Button
+                onClick={() => setStep("save")}
+                className={incomplete ? "button-disabled" : ""}
+              >
+                Continue to Save
+              </Button>
             </div>
           </section>
         </div>
@@ -3002,7 +2925,11 @@ function ImportWorkflow({
           <Button variant="ghost" onClick={() => setStep("review")}>
             Back to Review
           </Button>
-          <Button icon="check" onClick={saveImportedWorkout}>
+          <Button
+            icon="check"
+            onClick={saveImportedWorkout}
+            className={incomplete ? "button-disabled" : ""}
+          >
             Save Imported Workout
           </Button>
         </div>
