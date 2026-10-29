@@ -1,0 +1,9 @@
+/.SpecStory
+
+/.history
+
+/.vscode
+
+.env.local
+
+/node_modules

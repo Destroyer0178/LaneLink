@@ -1,4 +1,24 @@
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  AuthLoadingScreen,
+  AuthScreen,
+  MissingSupabaseConfiguration,
+  ProfileSetupScreen,
+} from "./auth/AuthScreens"
+import { AuthProvider, useAuth } from "./auth/AuthProvider"
+import {
+  createPiece,
+  createSet,
+  deletePiece,
+  deleteSet,
+  duplicatePiece as duplicateStoredPiece,
+  duplicateSet as duplicateStoredSet,
+  listOwnPieces,
+  listOwnSets,
+  migrateLegacyContent,
+  updatePiece,
+  updateSet,
+} from "./data/contentRepository"
 import { extractDocx } from "./import/documentExtraction"
 import { ImportSourcePreview } from "./import/ImportSourcePreview"
 import { NestedSetSummary } from "./import/NestedSetSummary"
@@ -137,6 +157,13 @@ const pieceYardageLabel = (piece: SetPiece) => {
   return result.status === "resolved" ? formatYards(result.yards) : "Unresolved"
 }
 const today = () => new Date().toISOString().slice(0, 10)
+const initialsFor = (name: string) =>
+  name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "LL"
 
 const seedWorkouts: Workout[] = [
   {
@@ -218,6 +245,15 @@ const emptyWorkout = (): Workout => ({
     { id: `s-${Date.now()}-3`, name: "Cooldown", pieces: [] },
   ],
 })
+
+function readLocalArray<T>(key: string): T[] {
+  try {
+    const value = localStorage.getItem(key)
+    return value ? JSON.parse(value) as T[] : []
+  } catch {
+    return []
+  }
+}
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const paths: Record<string, React.ReactNode> = {
@@ -360,19 +396,22 @@ function Button({
   onClick,
   type = "button",
   className = "",
+  disabled = false,
 }: {
   children?: React.ReactNode
   variant?: "primary" | "secondary" | "ghost" | "danger"
   icon?: string
-  onClick?: () => void
+  onClick?: () => void | Promise<void>
   type?: "button" | "submit"
   className?: string
+  disabled?: boolean
 }) {
   return (
     <button
       type={type}
       className={`button button-${variant} ${className}`}
       onClick={onClick}
+      disabled={disabled}
     >
       {icon && <Icon name={icon} />} {children}
     </button>
@@ -385,12 +424,14 @@ function Field({
   placeholder,
   className = "",
   type = "text",
+  disabled = false,
 }: {
   value: string | number
   onChange: (value: string) => void
   placeholder?: string
   className?: string
   type?: string
+  disabled?: boolean
 }) {
   return (
     <input
@@ -398,6 +439,7 @@ function Field({
       type={type}
       value={value}
       placeholder={placeholder}
+      disabled={disabled}
       onChange={(event) => onChange(event.target.value)}
     />
   )
@@ -429,16 +471,29 @@ function StatCard({
   )
 }
 
-function App() {
+function PlannerApp() {
+  const { user } = useAuth()
+  const ownerId = user!.id
+  const legacyContent = useRef({
+    workouts: readLocalArray<Workout>("swimflow-workouts"),
+    pieces: readLocalArray<SetPiece>("swimflow-pieces"),
+  }).current
+  const migrationMarker = `lanelink-supabase-migrated:${ownerId}`
   const [page, setPage] = useState<Page>("dashboard")
-  const [pieces, setPieces] = useState<SetPiece[]>(() => {
-    const stored = localStorage.getItem("swimflow-pieces")
-    return stored ? JSON.parse(stored) : seedPieces
-  })
-  const [workouts, setWorkouts] = useState<Workout[]>(() => {
-    const stored = localStorage.getItem("swimflow-workouts")
-    return stored ? JSON.parse(stored) : seedWorkouts
-  })
+  const [pieces, setPieces] = useState<SetPiece[]>([])
+  const [workouts, setWorkouts] = useState<Workout[]>([])
+  const [contentLoading, setContentLoading] = useState(true)
+  const [contentError, setContentError] = useState("")
+  const [pendingOperations, setPendingOperations] = useState<Set<string>>(
+    new Set(),
+  )
+  const pendingRef = useRef(new Set<string>())
+  const retryIdsRef = useRef(new Map<string, string>())
+  const [showLegacyMigration, setShowLegacyMigration] = useState(
+    () =>
+      (legacyContent.workouts.length > 0 || legacyContent.pieces.length > 0) &&
+      localStorage.getItem(migrationMarker) !== "done",
+  )
   const [current, setCurrent] = useState<Workout>(() => emptyWorkout())
   const [importStep, setImportStep] = useState<ImportStep>("upload")
   const [importScenario, setImportScenario] = useState<ImportSource | null>(
@@ -468,14 +523,54 @@ function App() {
   } | null>(null)
   const [notice, setNotice] = useState("")
 
-  useEffect(
-    () => localStorage.setItem("swimflow-pieces", JSON.stringify(pieces)),
-    [pieces],
+  const loadContent = useCallback(async () => {
+    setContentLoading(true)
+    setContentError("")
+    try {
+      const [savedSets, savedPieces] = await Promise.all([
+        listOwnSets(ownerId),
+        listOwnPieces(ownerId),
+      ])
+      setWorkouts(savedSets)
+      setPieces(savedPieces)
+    } catch (error) {
+      setContentError(
+        error instanceof Error
+          ? error.message
+          : "Your saved sets and pieces could not be loaded.",
+      )
+    } finally {
+      setContentLoading(false)
+    }
+  }, [ownerId])
+
+  useEffect(() => {
+    void loadContent()
+  }, [loadContent])
+
+  const runOperation = useCallback(
+    async <T,>(key: string, operation: () => Promise<T>) => {
+      if (pendingRef.current.has(key)) return undefined
+      pendingRef.current.add(key)
+      setPendingOperations(new Set(pendingRef.current))
+      setContentError("")
+      try {
+        return await operation()
+      } catch (error) {
+        setContentError(
+          error instanceof Error
+            ? error.message
+            : "The change could not be saved. Check your connection and retry.",
+        )
+        throw error
+      } finally {
+        pendingRef.current.delete(key)
+        setPendingOperations(new Set(pendingRef.current))
+      }
+    },
+    [],
   )
-  useEffect(
-    () => localStorage.setItem("swimflow-workouts", JSON.stringify(workouts)),
-    [workouts],
-  )
+
   useEffect(
     () =>
       localStorage.setItem(
@@ -488,8 +583,8 @@ function App() {
     const pageTitles: Record<Page, string> = {
       dashboard: "Dashboard",
       builder: "Workout Builder",
-      workouts: "My Workouts",
-      library: "Set Piece Library",
+      workouts: "My Sets",
+      library: "My Pieces",
       account: "Account Settings",
       preview: "Print Preview",
       import: "Import Workout",
@@ -522,8 +617,14 @@ function App() {
     navigate("import")
   }
 
-  const continueImport = (action: "save" | "discard") => {
-    if (action === "save") saveWorkout()
+  const continueImport = async (action: "save" | "discard") => {
+    if (action === "save") {
+      try {
+        await saveWorkout()
+      } catch {
+        return
+      }
+    }
     setImportPrompt(false)
     setImportScenario(null)
     setImportStep("upload")
@@ -535,25 +636,144 @@ function App() {
     navigate(preview ? "preview" : "builder")
   }
 
-  const saveWorkout = (asNew = false) => {
+  const saveWorkout = async (asNew = false) => {
+    const retryKey = "save-set-copy"
+    const copyId = asNew
+      ? (retryIdsRef.current.get(retryKey) ??
+        `w-${Date.now()}-${Math.random().toString(16).slice(2)}`)
+      : current.id
+    if (asNew) retryIdsRef.current.set(retryKey, copyId)
     const updated = {
       ...current,
-      id: asNew ? `w-${Date.now()}` : current.id,
+      id: copyId,
       created: asNew ? today() : current.created,
       modified: today(),
     }
     const exists = workouts.some((workout) => workout.id === updated.id)
-    setWorkouts(
-      exists
-        ? workouts.map((workout) =>
-            workout.id === updated.id ? updated : workout,
-          )
-        : [updated, ...workouts],
+    const stored = await runOperation(
+      `save-set:${asNew ? "copy" : updated.id}`,
+      () =>
+        exists ? updateSet(ownerId, updated) : createSet(ownerId, updated),
     )
-    setCurrent(updated)
+    if (!stored) return
+    setWorkouts((items) =>
+      exists
+        ? items.map((workout) => (workout.id === stored.id ? stored : workout))
+        : [stored, ...items],
+    )
+    setCurrent(stored)
+    if (asNew) retryIdsRef.current.delete(retryKey)
     showNotice(
       asNew ? "Workout saved as a new copy" : "Workout saved successfully",
     )
+  }
+
+  const saveLibraryPiece = async (piece: SetPiece, existingId?: string) => {
+    const stored = await runOperation(
+      `save-piece:${existingId ?? "new"}`,
+      () =>
+        existingId
+          ? updatePiece(ownerId, { ...piece, id: existingId })
+          : createPiece(ownerId, piece),
+    )
+    if (!stored) throw new Error("A save is already in progress.")
+    setPieces((items) =>
+      existingId
+        ? items.map((item) => (item.id === existingId ? stored : item))
+        : [stored, ...items],
+    )
+    return stored
+  }
+
+  const duplicateWorkout = async (workout: Workout) => {
+    const retryKey = `duplicate-set:${workout.id}`
+    const copyId =
+      retryIdsRef.current.get(retryKey) ??
+      `copy-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    retryIdsRef.current.set(retryKey, copyId)
+    const stored = await runOperation(`duplicate-set:${workout.id}`, () =>
+      duplicateStoredSet(ownerId, workout, copyId),
+    )
+    if (!stored) return
+    retryIdsRef.current.delete(retryKey)
+    setWorkouts((items) => [stored, ...items])
+    showNotice("Set duplicated")
+  }
+
+  const removeWorkout = async (workout: Workout) => {
+    await runOperation(`delete-set:${workout.id}`, () =>
+      deleteSet(ownerId, workout.id),
+    )
+    setWorkouts((items) => items.filter((item) => item.id !== workout.id))
+    showNotice("Set deleted")
+  }
+
+  const duplicateLibraryPiece = async (piece: SetPiece) => {
+    const retryKey = `duplicate-piece:${piece.id}`
+    const copyId =
+      retryIdsRef.current.get(retryKey) ??
+      `copy-${Date.now()}-${Math.random().toString(16).slice(2)}`
+    retryIdsRef.current.set(retryKey, copyId)
+    const stored = await runOperation(`duplicate-piece:${piece.id}`, () =>
+      duplicateStoredPiece(ownerId, piece, copyId),
+    )
+    if (!stored) return
+    retryIdsRef.current.delete(retryKey)
+    setPieces((items) => [stored, ...items])
+    showNotice("Set piece duplicated")
+  }
+
+  const removeLibraryPiece = async (piece: SetPiece) => {
+    await runOperation(`delete-piece:${piece.id}`, () =>
+      deletePiece(ownerId, piece.id),
+    )
+    setPieces((items) => items.filter((item) => item.id !== piece.id))
+    showNotice("Set piece deleted")
+  }
+
+  const searchSets = useCallback(
+    (query: string) => listOwnSets(ownerId, query),
+    [ownerId],
+  )
+  const searchPieces = useCallback(
+    (query: string) => listOwnPieces(ownerId, query),
+    [ownerId],
+  )
+
+  const importLegacyContent = async () => {
+    const migrated = await runOperation("migrate-local-content", () =>
+      migrateLegacyContent(
+        ownerId,
+        legacyContent.workouts,
+        legacyContent.pieces,
+      ),
+    )
+    if (!migrated) return
+    setWorkouts(migrated.workouts)
+    setPieces(migrated.pieces)
+    localStorage.setItem(migrationMarker, "done")
+    setShowLegacyMigration(false)
+    showNotice("Local sets and pieces imported to Supabase")
+  }
+
+  const saveImportedContent = async (
+    workout: Workout,
+    templates: SetPiece[],
+  ) => {
+    const result = await runOperation("save-import", async () => {
+      const storedWorkout = await createSet(ownerId, workout)
+      const storedPieces: SetPiece[] = []
+      for (const template of templates) {
+        storedPieces.push(await createPiece(ownerId, template))
+      }
+      return { workout: storedWorkout, pieces: storedPieces }
+    })
+    if (!result) throw new Error("This import is already being saved.")
+    setWorkouts((items) => [result.workout, ...items])
+    if (result.pieces.length) {
+      setPieces((items) => [...result.pieces, ...items])
+    }
+    return result
   }
 
   const totalSaved = workouts.reduce(
@@ -567,6 +787,51 @@ function App() {
       <Sidebar page={page} navigate={navigate} startNew={startNew} />
       <main className={page === "preview" ? "main preview-main" : "main"}>
         <Topbar page={page} />
+        {contentLoading && (
+          <div className="sync-banner" role="status">
+            <span className="spinner" />
+            Loading your Supabase sets and pieces…
+          </div>
+        )}
+        {contentError && (
+          <div className="sync-banner sync-error" role="alert">
+            <Icon name="alert" size={17} />
+            <span>{contentError}</span>
+            <Button variant="secondary" onClick={loadContent}>
+              Retry
+            </Button>
+          </div>
+        )}
+        {showLegacyMigration && (
+          <div className="migration-banner">
+            <div>
+              <strong>Bring your browser library into this account</strong>
+              <span>
+                Found {legacyContent.workouts.length} local set
+                {legacyContent.workouts.length === 1 ? "" : "s"} and{" "}
+                {legacyContent.pieces.length} local piece
+                {legacyContent.pieces.length === 1 ? "" : "s"}. Importing is
+                idempotent and keeps the browser copy as a backup.
+              </span>
+            </div>
+            <div>
+              <Button
+                variant="ghost"
+                onClick={() => setShowLegacyMigration(false)}
+              >
+                Not now
+              </Button>
+              <Button
+                onClick={importLegacyContent}
+                disabled={pendingOperations.has("migrate-local-content")}
+              >
+                {pendingOperations.has("migrate-local-content")
+                  ? "Importing…"
+                  : "Import local data"}
+              </Button>
+            </div>
+          </div>
+        )}
         {page === "dashboard" && (
           <Dashboard
             workouts={workouts}
@@ -590,6 +855,9 @@ function App() {
             setFilter={setFilter}
             setModal={setModal}
             saveWorkout={saveWorkout}
+            savingWorkout={[...pendingOperations].some((key) =>
+              key.startsWith("save-set:"),
+            )}
             navigate={navigate}
             beginImport={() => beginImport(true)}
             setIntervalTarget={setIntervalTarget}
@@ -602,7 +870,10 @@ function App() {
             total={totalSaved}
             average={average}
             openWorkout={openWorkout}
-            setWorkouts={setWorkouts}
+            onDuplicate={duplicateWorkout}
+            onDelete={removeWorkout}
+            searchSets={searchSets}
+            pendingOperations={pendingOperations}
             showNotice={showNotice}
             startNew={startNew}
             beginImport={() => beginImport()}
@@ -611,10 +882,12 @@ function App() {
         {page === "library" && (
           <LibraryPage
             pieces={pieces}
-            setPieces={setPieces}
             setModal={setModal}
             startNew={startNew}
-            showNotice={showNotice}
+            onDuplicate={duplicateLibraryPiece}
+            onDelete={removeLibraryPiece}
+            searchPieces={searchPieces}
+            pendingOperations={pendingOperations}
           />
         )}
         {page === "account" && <AccountPage showNotice={showNotice} />}
@@ -634,10 +907,7 @@ function App() {
             draft={importDraft}
             setDraft={setImportDraft}
             setModal={setModal}
-            pieces={pieces}
-            setPieces={setPieces}
-            workouts={workouts}
-            setWorkouts={setWorkouts}
+            saveImportedContent={saveImportedContent}
             savedImport={savedImport}
             setSavedImport={setSavedImport}
             savedLibraryCount={savedLibraryCount}
@@ -652,7 +922,7 @@ function App() {
           modal={modal}
           close={() => setModal({ open: false })}
           pieces={pieces}
-          setPieces={setPieces}
+          saveLibraryPiece={saveLibraryPiece}
           current={page === "import" ? importDraft : current}
           setCurrent={page === "import" ? setImportDraft : setCurrent}
           showNotice={showNotice}
@@ -740,11 +1010,13 @@ function Sidebar({
   navigate: (page: Page) => void
   startNew: () => void
 }) {
+  const { profile } = useAuth()
+  const coachName = profile?.display_name || "LaneLink Coach"
   const items: { page: Page; label: string; icon: string }[] = [
     { page: "dashboard", label: "Dashboard", icon: "dashboard" },
     { page: "builder", label: "Workout Builder", icon: "builder" },
-    { page: "workouts", label: "My Workouts", icon: "workouts" },
-    { page: "library", label: "Set Piece Library", icon: "library" },
+    { page: "workouts", label: "My Sets", icon: "workouts" },
+    { page: "library", label: "My Pieces", icon: "library" },
   ]
   return (
     <aside className="sidebar">
@@ -786,10 +1058,10 @@ function Sidebar({
           <span>Account Settings</span>
         </button>
         <div className="coach-card">
-          <div className="avatar">MC</div>
+          <div className="avatar">{initialsFor(coachName)}</div>
           <div>
-            <strong>Marcus Chen</strong>
-            <span>Head Coach</span>
+            <strong>{coachName}</strong>
+            <span>{profile?.organization || "Swim Coach"}</span>
           </div>
           <Icon name="more" />
         </div>
@@ -799,11 +1071,12 @@ function Sidebar({
 }
 
 function Topbar({ page }: { page: Page }) {
+  const { profile } = useAuth()
   const labels: Record<Page, string> = {
     dashboard: "Dashboard",
     builder: "Workout Builder",
-    workouts: "My Workouts",
-    library: "Set Piece Library",
+    workouts: "My Sets",
+    library: "My Pieces",
     account: "Account Settings",
     preview: "Print Preview",
     import: "Import Workout",
@@ -817,7 +1090,9 @@ function Topbar({ page }: { page: Page }) {
       </span>
       <div className="topbar-actions">
         <button className="help-button">?</button>
-        <div className="avatar avatar-small">MC</div>
+        <div className="avatar avatar-small">
+          {initialsFor(profile?.display_name || "LaneLink Coach")}
+        </div>
       </div>
     </header>
   )
@@ -842,12 +1117,14 @@ function Dashboard({
   navigate: (p: Page) => void
   beginImport: () => void
 }) {
+  const { profile } = useAuth()
+  const firstName = profile?.display_name.split(/\s+/)[0] || "Coach"
   return (
     <div className="page-content">
       <section className="welcome-row">
         <div>
           <span className="date-label">MONDAY, MAY 19</span>
-          <h1>Good morning, Marcus</h1>
+          <h1>Good morning, {firstName}</h1>
           <p>Here’s what’s happening across your workout library.</p>
         </div>
         <div className="heading-actions">
@@ -984,6 +1261,7 @@ function Builder({
   setFilter,
   setModal,
   saveWorkout,
+  savingWorkout,
   navigate,
   beginImport,
   setIntervalTarget,
@@ -1002,7 +1280,8 @@ function Builder({
     sectionId?: string
     libraryOnly?: boolean
   }>>
-  saveWorkout: (asNew?: boolean) => void
+  saveWorkout: (asNew?: boolean) => Promise<void>
+  savingWorkout: boolean
   navigate: (p: Page) => void
   beginImport: () => void
   setIntervalTarget: React.Dispatch<React.SetStateAction<{
@@ -1244,8 +1523,12 @@ function Builder({
           <Button variant="ghost" icon="upload" onClick={beginImport}>
             Import Existing
           </Button>
-          <Button variant="ghost" onClick={() => saveWorkout(true)}>
-            Save as New
+          <Button
+            variant="ghost"
+            onClick={() => void saveWorkout(true).catch(() => {})}
+            disabled={savingWorkout}
+          >
+            {savingWorkout ? "Saving…" : "Save as New"}
           </Button>
           <Button
             variant="secondary"
@@ -1254,8 +1537,12 @@ function Builder({
           >
             Preview PDF
           </Button>
-          <Button icon="check" onClick={() => saveWorkout()}>
-            Save Workout
+          <Button
+            icon="check"
+            onClick={() => void saveWorkout().catch(() => {})}
+            disabled={savingWorkout}
+          >
+            {savingWorkout ? "Saving…" : "Save Workout"}
           </Button>
         </div>
       </div>
@@ -1263,7 +1550,7 @@ function Builder({
         <aside className="library-panel">
           <div className="library-header">
             <div>
-              <h2>Set Piece Library</h2>
+              <h2>My Pieces</h2>
               <p>{pieces.length} reusable pieces</p>
             </div>
             <Button
@@ -1576,7 +1863,7 @@ function PieceModal({
   modal,
   close,
   pieces,
-  setPieces,
+  saveLibraryPiece,
   current,
   setCurrent,
   showNotice,
@@ -1589,7 +1876,7 @@ function PieceModal({
   }
   close: () => void
   pieces: SetPiece[]
-  setPieces: (p: SetPiece[]) => void
+  saveLibraryPiece: (piece: SetPiece, existingId?: string) => Promise<SetPiece>
   current: Workout
   setCurrent: React.Dispatch<React.SetStateAction<Workout>>
   showNotice: (m: string) => void
@@ -1614,10 +1901,13 @@ function PieceModal({
   const [selectedCircuitPiece, setSelectedCircuitPiece] = useState(
     pieces[0]?.id ?? "",
   )
+  const [saving, setSaving] = useState(false)
+  const [savingChildId, setSavingChildId] = useState("")
+  const [error, setError] = useState("")
   const isCircuit = draft.kind === "circuit"
   const circuitYardage = calculateCircuitYardage(draft)
   const draftYardage = calculatePieceYardage(draft)
-  const save = () => {
+  const save = async () => {
     if (!draft.name.trim()) return
     if (isCircuit && !draft.children?.length) return
     const finalDraft: SetPiece = {
@@ -1629,46 +1919,59 @@ function PieceModal({
       confidenceNote:
         draftYardage.status === "resolved" ? undefined : draftYardage.reason,
     }
-    if (modal.piece && modal.sectionId) {
-      setCurrent({
-        ...current,
-        sections: current.sections.map((section) =>
-          section.id === modal.sectionId
-            ? {
-                ...section,
-                pieces: section.pieces.map((piece) =>
-                  piece.id === modal.piece?.id ? finalDraft : piece,
-                ),
-              }
-            : section,
-        ),
-      })
-    } else if (modal.sectionId) {
-      setCurrent({
-        ...current,
-        sections: current.sections.map((section) =>
-          section.id === modal.sectionId
-            ? { ...section, pieces: [...section.pieces, copyPiece(finalDraft)] }
-            : section,
-        ),
-      })
-    }
-    if (saveToLibrary || modal.libraryOnly) {
-      const libraryPiece = {
-        ...finalDraft,
-        id:
-          modal.libraryOnly && modal.piece ? modal.piece.id : `p-${Date.now()}`,
+    setSaving(true)
+    setError("")
+    try {
+      if (saveToLibrary || modal.libraryOnly) {
+        await saveLibraryPiece(
+          {
+            ...finalDraft,
+            id:
+              modal.libraryOnly && modal.piece
+                ? modal.piece.id
+                : `p-${Date.now()}`,
+          },
+          modal.libraryOnly && modal.piece ? modal.piece.id : undefined,
+        )
       }
-      setPieces(
-        modal.libraryOnly && modal.piece
-          ? pieces.map((piece) =>
-              piece.id === modal.piece?.id ? libraryPiece : piece,
-            )
-          : [libraryPiece, ...pieces],
+      if (modal.piece && modal.sectionId) {
+        setCurrent({
+          ...current,
+          sections: current.sections.map((section) =>
+            section.id === modal.sectionId
+              ? {
+                  ...section,
+                  pieces: section.pieces.map((piece) =>
+                    piece.id === modal.piece?.id ? finalDraft : piece,
+                  ),
+                }
+              : section,
+          ),
+        })
+      } else if (modal.sectionId) {
+        setCurrent({
+          ...current,
+          sections: current.sections.map((section) =>
+            section.id === modal.sectionId
+              ? {
+                  ...section,
+                  pieces: [...section.pieces, copyPiece(finalDraft)],
+                }
+              : section,
+          ),
+        })
+      }
+      showNotice(modal.piece ? "Set piece updated" : "Set piece created")
+      close()
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "The set piece could not be saved.",
       )
+    } finally {
+      setSaving(false)
     }
-    showNotice(modal.piece ? "Set piece updated" : "Set piece created")
-    close()
   }
   return (
     <div
@@ -1982,9 +2285,22 @@ function PieceModal({
                     </button>
                     <button
                       title="Save child as new library template"
-                      onClick={() => {
-                        setPieces([copyPiece(child), ...pieces])
-                        showNotice(`${child.name} saved to the library`)
+                      disabled={savingChildId === child.id}
+                      onClick={async () => {
+                        setSavingChildId(child.id)
+                        setError("")
+                        try {
+                          await saveLibraryPiece(copyPiece(child))
+                          showNotice(`${child.name} saved to My Pieces`)
+                        } catch (caught) {
+                          setError(
+                            caught instanceof Error
+                              ? caught.message
+                              : "The set piece could not be saved.",
+                          )
+                        } finally {
+                          setSavingChildId("")
+                        }
                       }}
                     >
                       <Icon name="library" size={15} />
@@ -2168,18 +2484,23 @@ function PieceModal({
               />
               <span className="toggle" />
               <span>
-                <strong>Save to Set Piece Library</strong>
+                <strong>Save to My Pieces</strong>
                 <small>Reuse this set in future workouts</small>
               </span>
             </label>
+          )}
+          {error && (
+            <div className="auth-message error wide" role="alert">
+              {error}
+            </div>
           )}
         </div>
         <div className="modal-footer">
           <Button variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button icon="check" onClick={save}>
-            {modal.piece ? "Save Changes" : "Create Piece"}
+          <Button icon="check" onClick={save} disabled={saving}>
+            {saving ? "Saving…" : modal.piece ? "Save Changes" : "Create Piece"}
           </Button>
         </div>
       </div>
@@ -2192,8 +2513,10 @@ function WorkoutsPage({
   total,
   average,
   openWorkout,
-  setWorkouts,
-  showNotice,
+  onDuplicate,
+  onDelete,
+  searchSets,
+  pendingOperations,
   startNew,
   beginImport,
 }: {
@@ -2201,46 +2524,66 @@ function WorkoutsPage({
   total: number
   average: number
   openWorkout: (w: Workout, preview?: boolean) => void
-  setWorkouts: (w: Workout[]) => void
-  showNotice: (m: string) => void
+  onDuplicate: (workout: Workout) => Promise<void>
+  onDelete: (workout: Workout) => Promise<void>
+  searchSets: (query: string) => Promise<Workout[]>
+  pendingOperations: Set<string>
   startNew: () => void
   beginImport: () => void
 }) {
   const [query, setQuery] = useState("")
   const [sort, setSort] = useState("modified")
+  const [searchResults, setSearchResults] = useState<Workout[] | null>(null)
+  const [searching, setSearching] = useState(false)
+  const [searchError, setSearchError] = useState("")
+  useEffect(() => {
+    if (!query.trim()) {
+      setSearchResults(null)
+      setSearching(false)
+      setSearchError("")
+      return
+    }
+    let active = true
+    setSearching(true)
+    setSearchError("")
+    const timer = window.setTimeout(() => {
+      searchSets(query)
+        .then((results) => {
+          if (active) setSearchResults(results)
+        })
+        .catch((error) => {
+          if (active) {
+            setSearchError(
+              error instanceof Error ? error.message : "Search failed.",
+            )
+          }
+        })
+        .finally(() => {
+          if (active) setSearching(false)
+        })
+    }, 250)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [query, searchSets])
+
   const displayed = useMemo(
     () =>
-      [...workouts]
-        .filter((workout) =>
-          workout.title.toLowerCase().includes(query.toLowerCase()),
-        )
-        .sort((a, b) =>
-          sort === "name"
-            ? a.title.localeCompare(b.title)
-            : b.modified.localeCompare(a.modified),
-        ),
-    [workouts, query, sort],
+      [...(searchResults ?? workouts)].sort((a, b) =>
+        sort === "name"
+          ? a.title.localeCompare(b.title)
+          : b.modified.localeCompare(a.modified),
+      ),
+    [workouts, searchResults, sort],
   )
-  const duplicate = (workout: Workout) => {
-    setWorkouts([
-      {
-        ...JSON.parse(JSON.stringify(workout)),
-        id: `w-${Date.now()}`,
-        title: `${workout.title} Copy`,
-        created: today(),
-        modified: today(),
-      },
-      ...workouts,
-    ])
-    showNotice("Workout duplicated")
-  }
   return (
     <div className="page-content">
       <section className="page-heading">
         <div>
           <span className="eyebrow">WORKOUT MANAGEMENT</span>
-          <h1>My Workouts</h1>
-          <p>Browse, track, and manage your saved practices.</p>
+          <h1>My Sets</h1>
+          <p>Browse, search, and manage your Supabase-backed practices.</p>
         </div>
         <div className="heading-actions">
           <Button variant="secondary" icon="upload" onClick={beginImport}>
@@ -2275,7 +2618,7 @@ function WorkoutsPage({
             <Field
               value={query}
               onChange={setQuery}
-              placeholder="Search workouts..."
+              placeholder="Search your sets..."
             />
           </label>
           <select
@@ -2285,7 +2628,13 @@ function WorkoutsPage({
             <option value="modified">Recently modified</option>
             <option value="name">Name A–Z</option>
           </select>
+          {searching && <span className="search-status">Searching…</span>}
         </div>
+        {searchError && (
+          <div className="inline-error table-message" role="alert">
+            {searchError}
+          </div>
+        )}
         <div className="workout-table">
           <div className="table-row table-header">
             <span>Workout</span>
@@ -2337,16 +2686,26 @@ function WorkoutsPage({
                 >
                   <Icon name="print" />
                 </button>
-                <button title="Duplicate" onClick={() => duplicate(workout)}>
+                <button
+                  title="Duplicate"
+                  disabled={pendingOperations.has(
+                    `duplicate-set:${workout.id}`,
+                  )}
+                  onClick={() => void onDuplicate(workout).catch(() => {})}
+                >
                   <Icon name="duplicate" />
                 </button>
                 <button
                   title="Delete"
+                  disabled={pendingOperations.has(`delete-set:${workout.id}`)}
                   onClick={() => {
-                    setWorkouts(
-                      workouts.filter((item) => item.id !== workout.id),
-                    )
-                    showNotice("Workout deleted")
+                    if (
+                      window.confirm(
+                        `Delete “${workout.title}”? This cannot be undone.`,
+                      )
+                    ) {
+                      void onDelete(workout).catch(() => {})
+                    }
                   }}
                 >
                   <Icon name="trash" />
@@ -2360,18 +2719,22 @@ function WorkoutsPage({
             <span>
               <Icon name="workouts" size={28} />
             </span>
-            <h2>No saved workouts yet</h2>
+            <h2>{query.trim() ? "No matching sets" : "No saved sets yet"}</h2>
             <p>
-              Create a workout from scratch or bring in an existing document.
+              {query.trim()
+                ? "Try a different search."
+                : "Create a workout from scratch or bring in an existing document."}
             </p>
-            <div className="heading-actions">
-              <Button variant="secondary" icon="upload" onClick={beginImport}>
-                Import Workout
-              </Button>
-              <Button icon="plus" onClick={startNew}>
-                Create Workout
-              </Button>
-            </div>
+            {!query.trim() && (
+              <div className="heading-actions">
+                <Button variant="secondary" icon="upload" onClick={beginImport}>
+                  Import Workout
+                </Button>
+                <Button icon="plus" onClick={startNew}>
+                  Create Workout
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -2381,13 +2744,14 @@ function WorkoutsPage({
 
 function LibraryPage({
   pieces,
-  setPieces,
   setModal,
   startNew,
-  showNotice,
+  onDuplicate,
+  onDelete,
+  searchPieces,
+  pendingOperations,
 }: {
   pieces: SetPiece[]
-  setPieces: (p: SetPiece[]) => void
   setModal: React.Dispatch<React.SetStateAction<{
     open: boolean
     piece?: SetPiece
@@ -2395,22 +2759,65 @@ function LibraryPage({
     libraryOnly?: boolean
   }>>
   startNew: () => void
-  showNotice: (m: string) => void
+  onDuplicate: (piece: SetPiece) => Promise<void>
+  onDelete: (piece: SetPiece) => Promise<void>
+  searchPieces: (query: string) => Promise<SetPiece[]>
+  pendingOperations: Set<string>
 }) {
   const [query, setQuery] = useState("")
   const [category, setCategory] = useState("All")
-  const filtered = pieces.filter(
-    (piece) =>
-      (category === "All" || piece.category === category) &&
-      piece.name.toLowerCase().includes(query.toLowerCase()),
-  )
+  const [sort, setSort] = useState("modified")
+  const [searchResults, setSearchResults] = useState<SetPiece[] | null>(null)
+  const [searching, setSearching] = useState(false)
+  const [searchError, setSearchError] = useState("")
+  useEffect(() => {
+    if (!query.trim()) {
+      setSearchResults(null)
+      setSearching(false)
+      setSearchError("")
+      return
+    }
+    let active = true
+    setSearching(true)
+    setSearchError("")
+    const timer = window.setTimeout(() => {
+      searchPieces(query)
+        .then((results) => {
+          if (active) setSearchResults(results)
+        })
+        .catch((error) => {
+          if (active) {
+            setSearchError(
+              error instanceof Error ? error.message : "Search failed.",
+            )
+          }
+        })
+        .finally(() => {
+          if (active) setSearching(false)
+        })
+    }, 250)
+    return () => {
+      active = false
+      window.clearTimeout(timer)
+    }
+  }, [query, searchPieces])
+
+  const filtered = (searchResults ?? pieces)
+    .filter((piece) => category === "All" || piece.category === category)
+    .sort((a, b) =>
+      sort === "name"
+        ? a.name.localeCompare(b.name)
+        : sort === "yardage"
+          ? yardage(b) - yardage(a)
+          : 0,
+    )
   return (
     <div className="page-content">
       <section className="page-heading">
         <div>
           <span className="eyebrow">REUSABLE COMPONENTS</span>
-          <h1>Set Piece Library</h1>
-          <p>Build once, reuse across every practice.</p>
+          <h1>My Pieces</h1>
+          <p>Build once, save to Supabase, and reuse across every practice.</p>
         </div>
         <Button
           icon="plus"
@@ -2425,7 +2832,7 @@ function LibraryPage({
           <Field
             value={query}
             onChange={setQuery}
-            placeholder="Search your library..."
+            placeholder="Search your pieces..."
           />
         </label>
         <select
@@ -2437,12 +2844,18 @@ function LibraryPage({
             <option key={item}>{item}</option>
           ))}
         </select>
-        <select>
-          <option>Recently used</option>
-          <option>Name A–Z</option>
-          <option>Yardage</option>
+        <select value={sort} onChange={(event) => setSort(event.target.value)}>
+          <option value="modified">Recently updated</option>
+          <option value="name">Name A–Z</option>
+          <option value="yardage">Yardage</option>
         </select>
+        {searching && <span className="search-status">Searching…</span>}
       </div>
+      {searchError && (
+        <div className="inline-error table-message" role="alert">
+          {searchError}
+        </div>
+      )}
       {filtered.length ? (
         <div className="library-grid">
           {filtered.map((piece) => (
@@ -2476,25 +2889,24 @@ function LibraryPage({
                 </button>
                 <button
                   title="Duplicate"
-                  onClick={() => {
-                    setPieces([
-                      {
-                        ...piece,
-                        id: `p-${Date.now()}`,
-                        name: `${piece.name} Copy`,
-                      },
-                      ...pieces,
-                    ])
-                    showNotice("Set piece duplicated")
-                  }}
+                  disabled={pendingOperations.has(
+                    `duplicate-piece:${piece.id}`,
+                  )}
+                  onClick={() => void onDuplicate(piece).catch(() => {})}
                 >
                   <Icon name="duplicate" />
                 </button>
                 <button
                   title="Delete"
+                  disabled={pendingOperations.has(`delete-piece:${piece.id}`)}
                   onClick={() => {
-                    setPieces(pieces.filter((item) => item.id !== piece.id))
-                    showNotice("Set piece deleted")
+                    if (
+                      window.confirm(
+                        `Delete “${piece.name}”? This cannot be undone.`,
+                      )
+                    ) {
+                      void onDelete(piece).catch(() => {})
+                    }
                   }}
                 >
                   <Icon name="trash" />
@@ -2508,14 +2920,20 @@ function LibraryPage({
           <span>
             <Icon name="search" size={28} />
           </span>
-          <h2>No set pieces found</h2>
-          <p>Try a different search or create a new reusable piece.</p>
-          <Button
-            icon="plus"
-            onClick={() => setModal({ open: true, libraryOnly: true })}
-          >
-            Create Set Piece
-          </Button>
+          <h2>{query.trim() ? "No matching pieces" : "No saved pieces yet"}</h2>
+          <p>
+            {query.trim()
+              ? "Try a different search or category."
+              : "Create a reusable piece to use across workouts."}
+          </p>
+          {!query.trim() && (
+            <Button
+              icon="plus"
+              onClick={() => setModal({ open: true, libraryOnly: true })}
+            >
+              Create Set Piece
+            </Button>
+          )}
         </div>
       )}
     </div>
@@ -2523,6 +2941,49 @@ function LibraryPage({
 }
 
 function AccountPage({ showNotice }: { showNotice: (m: string) => void }) {
+  const { profile, user, saveProfile, signOut } = useAuth()
+  const [displayName, setDisplayName] = useState(profile?.display_name ?? "")
+  const [organization, setOrganization] = useState(profile?.organization ?? "")
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState("")
+
+  useEffect(() => {
+    setDisplayName(profile?.display_name ?? "")
+    setOrganization(profile?.organization ?? "")
+  }, [profile])
+
+  const save = async () => {
+    if (!displayName.trim()) {
+      setError("Coach display name is required.")
+      return
+    }
+    setSaving(true)
+    setError("")
+    try {
+      await saveProfile(displayName, organization)
+      showNotice("Profile settings saved")
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Profile settings could not be saved.",
+      )
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const logout = async () => {
+    setError("")
+    try {
+      await signOut()
+    } catch (caught) {
+      setError(
+        caught instanceof Error ? caught.message : "Sign out was unsuccessful.",
+      )
+    }
+  }
+
   return (
     <div className="page-content account-page">
       <section className="page-heading">
@@ -2548,42 +3009,44 @@ function AccountPage({ showNotice }: { showNotice: (m: string) => void }) {
               </div>
             </div>
             <div className="profile-row">
-              <div className="avatar avatar-large">MC</div>
+              <div className="avatar avatar-large">
+                {initialsFor(displayName)}
+              </div>
               <div>
-                <Button variant="secondary">Change photo</Button>
-                <p>JPG or PNG. Maximum 2 MB.</p>
+                <strong>{displayName || "LaneLink Coach"}</strong>
+                <p>Profile identity managed through your Supabase account.</p>
               </div>
             </div>
             <div className="settings-form">
-              <label className="form-label">
-                <span>First name</span>
-                <Field value="Marcus" onChange={() => {}} />
-              </label>
-              <label className="form-label">
-                <span>Last name</span>
-                <Field value="Chen" onChange={() => {}} />
+              <label className="form-label wide">
+                <span>Coach display name</span>
+                <Field value={displayName} onChange={setDisplayName} />
               </label>
               <label className="form-label wide">
                 <span>Email address</span>
-                <Field value="marcus@northshoreswim.com" onChange={() => {}} />
+                <Field value={user?.email ?? ""} onChange={() => {}} disabled />
               </label>
               <label className="form-label wide">
                 <span>Team / organization</span>
-                <Field value="North Shore Aquatics" onChange={() => {}} />
+                <Field value={organization} onChange={setOrganization} />
               </label>
+              {error && <div className="auth-message error wide">{error}</div>}
             </div>
             <div className="settings-save">
-              <Button onClick={() => showNotice("Profile settings saved")}>
-                Save Changes
+              <Button
+                className={saving ? "button-disabled" : ""}
+                onClick={save}
+              >
+                {saving ? "Saving…" : "Save Changes"}
               </Button>
             </div>
           </div>
           <div className="panel signout-panel">
             <div>
-              <h3>Signed in as Marcus Chen</h3>
-              <p>Your workouts are saved to this coach account.</p>
+              <h3>Signed in as {profile?.display_name}</h3>
+              <p>{user?.email}</p>
             </div>
-            <Button variant="danger" icon="logout">
+            <Button variant="danger" icon="logout" onClick={logout}>
               Sign Out
             </Button>
           </div>
@@ -2601,10 +3064,7 @@ function ImportWorkflow({
   draft,
   setDraft,
   setModal,
-  pieces,
-  setPieces,
-  workouts,
-  setWorkouts,
+  saveImportedContent,
   savedImport,
   setSavedImport,
   savedLibraryCount,
@@ -2624,10 +3084,10 @@ function ImportWorkflow({
     sectionId?: string
     libraryOnly?: boolean
   }>>
-  pieces: SetPiece[]
-  setPieces: (pieces: SetPiece[]) => void
-  workouts: Workout[]
-  setWorkouts: (workouts: Workout[]) => void
+  saveImportedContent: (
+    workout: Workout,
+    templates: SetPiece[],
+  ) => Promise<{ workout: Workout; pieces: SetPiece[] }>
   savedImport: Workout | null
   setSavedImport: (workout: Workout | null) => void
   savedLibraryCount: number
@@ -2642,6 +3102,8 @@ function ImportWorkflow({
   const [isExtracting, setIsExtracting] = useState(false)
   const [selectedTemplates, setSelectedTemplates] = useState<string[]>([])
   const [saveTemplates, setSaveTemplates] = useState(true)
+  const [isSavingImport, setIsSavingImport] = useState(false)
+  const [saveError, setSaveError] = useState("")
 
   useEffect(() => {
     if (step !== "processing") return
@@ -2800,14 +3262,14 @@ function ImportWorkflow({
     .filter((piece) => piece.confidence !== "verified")
   const incomplete = calculateWorkoutYardage(draft).status === "unresolved"
 
-  const saveImportedWorkout = () => {
+  const saveImportedWorkout = async () => {
     if (calculateWorkoutYardage(draft).status === "unresolved") {
       setStep("review")
       return
     }
     const approved: Workout = {
       ...JSON.parse(JSON.stringify(draft)),
-      id: `w-import-${Date.now()}`,
+      id: draft.id,
       created: draft.created || today(),
       modified: today(),
       description:
@@ -2822,15 +3284,26 @@ function ImportWorkflow({
             const template: SetPiece = JSON.parse(JSON.stringify(piece))
             return {
               ...template,
-              id: `p-import-${Date.now()}-${Math.random()}`,
+              id: `template-${piece.id}`,
             }
           })
       : []
-    setWorkouts([approved, ...workouts])
-    if (selected.length) setPieces([...selected, ...pieces])
-    setSavedImport(approved)
-    setSavedLibraryCount(selected.length)
-    setStep("success")
+    setIsSavingImport(true)
+    setSaveError("")
+    try {
+      const stored = await saveImportedContent(approved, selected)
+      setSavedImport(stored.workout)
+      setSavedLibraryCount(stored.pieces.length)
+      setStep("success")
+    } catch (error) {
+      setSaveError(
+        error instanceof Error
+          ? error.message
+          : "The imported workout could not be saved.",
+      )
+    } finally {
+      setIsSavingImport(false)
+    }
   }
 
   if (step === "upload") {
@@ -3392,7 +3865,7 @@ function ImportWorkflow({
               <span />
               <div>
                 <strong>Save Workout</strong>
-                <p>Save the complete converted workout to My Workouts.</p>
+                <p>Save the complete converted workout to My Sets.</p>
               </div>
             </label>
             <label className={`save-option ${saveTemplates ? "selected" : ""}`}>
@@ -3406,7 +3879,7 @@ function ImportWorkflow({
                 <strong>Save Workout and Reusable Pieces</strong>
                 <p>
                   Also add selected pieces as independent templates in your Set
-                  Piece Library.
+                  My Pieces.
                 </p>
               </div>
             </label>
@@ -3467,11 +3940,16 @@ function ImportWorkflow({
           <Button
             icon="check"
             onClick={saveImportedWorkout}
-            className={incomplete ? "button-disabled" : ""}
+            disabled={incomplete || isSavingImport}
           >
-            Save Imported Workout
+            {isSavingImport ? "Saving to Supabase…" : "Save Imported Workout"}
           </Button>
         </div>
+        {saveError && (
+          <div className="inline-error import-save-error" role="alert">
+            {saveError}
+          </div>
+        )}
       </div>
     )
   }
@@ -3484,7 +3962,7 @@ function ImportWorkflow({
         </span>
         <span className="eyebrow">IMPORT COMPLETE</span>
         <h1>Workout Imported Successfully</h1>
-        <p>“{savedImport?.title}” has been added to My Workouts.</p>
+        <p>“{savedImport?.title}” has been added to My Sets.</p>
         <div className="success-workout">
           <div>
             <span className="file-icon">
@@ -3526,7 +4004,7 @@ function ImportWorkflow({
             Open Workout
           </Button>
           <Button variant="secondary" onClick={() => navigate("workouts")}>
-            View My Workouts
+            View My Sets
           </Button>
           <Button
             icon="print"
@@ -3549,6 +4027,9 @@ function Preview({
   navigate: (p: Page) => void
   showNotice: (m: string) => void
 }) {
+  const { profile } = useAuth()
+  const coachName = profile?.display_name || "LaneLink Coach"
+  const organization = profile?.organization || "Independent Coach"
   const [intervalDisplay, setIntervalDisplay] =
     useState<"all" | "selected" | "compact" | "none">("compact")
   const [selectedGroupIndex, setSelectedGroupIndex] = useState(0)
@@ -3617,7 +4098,7 @@ function Preview({
                 <small>CONNECT. CREATE. COACH.</small>
               </span>
             </div>
-            <span>North Shore Aquatics</span>
+            <span>{organization}</span>
           </header>
           <div className="paper-title">
             <div>
@@ -3716,12 +4197,34 @@ function Preview({
             ))}
           </div>
           <footer className="paper-footer">
-            <span>Coach Marcus Chen · North Shore Aquatics</span>
+            <span>
+              Coach {coachName} · {organization}
+            </span>
             <span>Generated with LaneLink</span>
           </footer>
         </article>
       </div>
     </div>
+  )
+}
+
+function AuthenticatedApp() {
+  const { configured, loading, session, profile, isRecovery } = useAuth()
+
+  if (!configured) return <MissingSupabaseConfiguration />
+  if (loading) return <AuthLoadingScreen />
+  if (isRecovery) return <AuthScreen />
+  if (!session) return <AuthScreen />
+  if (!profile?.display_name.trim()) return <ProfileSetupScreen />
+
+  return <PlannerApp />
+}
+
+function App() {
+  return (
+    <AuthProvider>
+      <AuthenticatedApp />
+    </AuthProvider>
   )
 }
 

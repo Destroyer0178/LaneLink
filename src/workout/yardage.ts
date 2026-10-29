@@ -1,6 +1,6 @@
 import type { SetPiece, Workout, WorkoutSection } from "./types"
 
-export type YardageResult = { status: "resolved"; yards: number } | {
+export type YardageResult = { status: "resolved" yards: number } | {
   status: "unresolved"
   yards: null
   reason: string
