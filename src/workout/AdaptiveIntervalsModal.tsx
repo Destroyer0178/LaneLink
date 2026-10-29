@@ -136,7 +136,7 @@ export function AdaptiveIntervalsModal({
 
   const updateGroup = (
     groupId: string,
-    changes: { name?: string sendOffSeconds?: number },
+    changes: { name?: string; sendOffSeconds?: number },
   ) => {
     if (!recommendation) return
     setRecommendation({
@@ -166,8 +166,8 @@ export function AdaptiveIntervalsModal({
             : GOAL_RULES[config.goal].maxRestRatio
         const excessive = members.filter(
           (estimate) =>
-            changes.sendOffSeconds! - estimate.workingTimeSeconds as number >
-            estimate.workingTimeSeconds as number * maxRestRatio,
+            changes.sendOffSeconds! - (estimate.workingTimeSeconds as number) >
+            (estimate.workingTimeSeconds as number) * maxRestRatio,
         )
         const warnings: string[] = []
         if (insufficient.length)
