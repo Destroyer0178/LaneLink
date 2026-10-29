@@ -4,17 +4,23 @@ import { ImportSourcePreview } from "./import/ImportSourcePreview"
 import { NestedSetSummary } from "./import/NestedSetSummary"
 import { parseWorkoutText } from "./import/parser"
 import type {
+  AdaptiveIntervalConfig,
   Category,
+  PerformanceRecord,
   SetPiece,
   Workout,
   WorkoutSection,
 } from "./workout/types"
 import {
+  calculateCircuitYardage,
   calculatePieceYardage,
   calculateSectionYardage,
   calculateWorkoutYardage,
   resolvedYardageOrZero,
 } from "./workout/yardage"
+import { AdaptiveIntervalsModal } from "./workout/AdaptiveIntervalsModal"
+import { recommendIntervals } from "./workout/intervals"
+import { circuitPrintLines, intervalGroupsForPrint } from "./workout/print"
 
 type Page = "dashboard" | "builder" | "workouts" | "library" | "account" | "preview" | "import"
 type ImportStep = "upload" | "processing" | "review" | "save" | "success"
@@ -450,6 +456,16 @@ function App() {
     sectionId?: string
     libraryOnly?: boolean
   }>({ open: false })
+  const [performanceRecords, setPerformanceRecords] =
+    useState<PerformanceRecord[]>(() => {
+      const stored = localStorage.getItem("swimflow-performance-records")
+      return stored ? JSON.parse(stored) : []
+    })
+  const [intervalTarget, setIntervalTarget] = useState<{
+    piece: SetPiece
+    sectionId: string
+    parentPieceId?: string
+  } | null>(null)
   const [notice, setNotice] = useState("")
 
   useEffect(
@@ -460,6 +476,26 @@ function App() {
     () => localStorage.setItem("swimflow-workouts", JSON.stringify(workouts)),
     [workouts],
   )
+  useEffect(
+    () =>
+      localStorage.setItem(
+        "swimflow-performance-records",
+        JSON.stringify(performanceRecords),
+      ),
+    [performanceRecords],
+  )
+  useEffect(() => {
+    const pageTitles: Record<Page, string> = {
+      dashboard: "Dashboard",
+      builder: "Workout Builder",
+      workouts: "My Workouts",
+      library: "Set Piece Library",
+      account: "Account Settings",
+      preview: "Print Preview",
+      import: "Import Workout",
+    }
+    document.title = `LaneLink — ${pageTitles[page]}`
+  }, [page])
 
   const showNotice = (message: string) => {
     setNotice(message)
@@ -556,6 +592,8 @@ function App() {
             saveWorkout={saveWorkout}
             navigate={navigate}
             beginImport={() => beginImport(true)}
+            setIntervalTarget={setIntervalTarget}
+            performanceRecords={performanceRecords}
           />
         )}
         {page === "workouts" && (
@@ -620,6 +658,39 @@ function App() {
           showNotice={showNotice}
         />
       )}
+      {intervalTarget && (
+        <AdaptiveIntervalsModal
+          piece={intervalTarget.piece}
+          records={performanceRecords}
+          onRecordsChange={setPerformanceRecords}
+          onClose={() => setIntervalTarget(null)}
+          onSave={(updatedPiece) => {
+            setCurrent({
+              ...current,
+              sections: current.sections.map((section) => {
+                if (section.id !== intervalTarget.sectionId) return section
+                return {
+                  ...section,
+                  pieces: section.pieces.map((piece) => {
+                    if (intervalTarget.parentPieceId) {
+                      if (piece.id !== intervalTarget.parentPieceId)
+                        return piece
+                      return {
+                        ...piece,
+                        children: piece.children?.map((child) =>
+                          child.id === updatedPiece.id ? updatedPiece : child,
+                        ),
+                      }
+                    }
+                    return piece.id === updatedPiece.id ? updatedPiece : piece
+                  }),
+                }
+              }),
+            })
+            showNotice("Adaptive interval settings updated")
+          }}
+        />
+      )}
       {importPrompt && (
         <div className="modal-backdrop">
           <div className="confirm-modal">
@@ -669,7 +740,7 @@ function Sidebar({
   navigate: (page: Page) => void
   startNew: () => void
 }) {
-  const items: { page: Page; label: string; icon: string }[] = [
+  const items: { page: Page label: string icon: string }[] = [
     { page: "dashboard", label: "Dashboard", icon: "dashboard" },
     { page: "builder", label: "Workout Builder", icon: "builder" },
     { page: "workouts", label: "My Workouts", icon: "workouts" },
@@ -683,8 +754,11 @@ function Sidebar({
           <span />
           <span />
         </span>
-        <span>
-          Swim<strong>Flow</strong>
+        <span className="brand-copy">
+          <span>
+            Lane<strong>Link</strong>
+          </span>
+          <small>Connect. Create. Coach.</small>
         </span>
       </button>
       <Button icon="plus" className="new-workout" onClick={startNew}>
@@ -736,7 +810,7 @@ function Topbar({ page }: { page: Page }) {
   }
   return (
     <header className="topbar">
-      <span className="mobile-logo">SwimFlow</span>
+      <span className="mobile-logo">LaneLink</span>
       <span className="breadcrumb">
         Workspace <Icon name="chevron" size={14} />{" "}
         <strong>{labels[page]}</strong>
@@ -885,7 +959,7 @@ function Dashboard({
           <span />
         </div>
         <div>
-          <span className="eyebrow">Weekly planning</span>
+          <span className="eyebrow">Connect. Create. Coach.</span>
           <h2>Build this week’s next practice</h2>
           <p>
             Start from your saved pieces and have a pool-ready workout in
@@ -912,6 +986,8 @@ function Builder({
   saveWorkout,
   navigate,
   beginImport,
+  setIntervalTarget,
+  performanceRecords,
 }: {
   current: Workout
   setCurrent: React.Dispatch<React.SetStateAction<Workout>>
@@ -929,6 +1005,12 @@ function Builder({
   saveWorkout: (asNew?: boolean) => void
   navigate: (p: Page) => void
   beginImport: () => void
+  setIntervalTarget: React.Dispatch<React.SetStateAction<{
+    piece: SetPiece
+    sectionId: string
+    parentPieceId?: string
+  } | null>>
+  performanceRecords: PerformanceRecord[]
 }) {
   const [draggedPiece, setDraggedPiece] = useState<{
     source: "library" | "workout"
@@ -1060,6 +1142,63 @@ function Builder({
     setDraggedPiece(null)
     setDragOverSection(null)
   }
+  const applyAdaptiveToEligibleSets = () => {
+    const eligibleCount = current.sections
+      .flatMap((section) => section.pieces)
+      .reduce(
+        (count, piece) =>
+          count +
+          (piece.kind === "circuit"
+            ? (piece.children ?? []).filter((child) => child.distance > 0)
+                .length
+            : piece.distance > 0
+              ? 1
+              : 0),
+        0,
+      )
+    if (
+      !window.confirm(
+        `Calculate recommendations for ${eligibleCount} eligible set${
+          eligibleCount === 1 ? "" : "s"
+        } using ${performanceRecords.length} saved performance record${
+          performanceRecords.length === 1 ? "" : "s"
+        }? Existing manual overrides will be preserved.`,
+      )
+    ) {
+      return
+    }
+    const updatePiece = (piece: SetPiece): SetPiece => {
+      if (piece.kind === "circuit") {
+        return {
+          ...piece,
+          children: piece.children?.map(updatePiece),
+        }
+      }
+      if (!piece.distance) return piece
+      const config: AdaptiveIntervalConfig = piece.adaptiveInterval ?? {
+        enabled: true,
+        goal: "aerobic",
+        groupCount: 3,
+      }
+      if (config.manualIntervalSeconds) return piece
+      return {
+        ...piece,
+        adaptiveInterval: {
+          ...config,
+          enabled: true,
+          recommendation: recommendIntervals(piece, performanceRecords, config),
+        },
+      }
+    }
+    setCurrent({
+      ...current,
+      adaptiveIntervalsEnabled: true,
+      sections: current.sections.map((section) => ({
+        ...section,
+        pieces: section.pieces.map(updatePiece),
+      })),
+    })
+  }
 
   return (
     <div className="builder-page">
@@ -1083,6 +1222,25 @@ function Builder({
           />
         </div>
         <div className="builder-actions">
+          <label className="builder-adaptive-toggle">
+            <input
+              type="checkbox"
+              checked={current.adaptiveIntervalsEnabled ?? false}
+              onChange={(event) =>
+                setCurrent({
+                  ...current,
+                  adaptiveIntervalsEnabled: event.target.checked,
+                })
+              }
+            />
+            <span className="toggle" />
+            <span>Adaptive intervals</span>
+          </label>
+          {current.adaptiveIntervalsEnabled && (
+            <Button variant="ghost" onClick={applyAdaptiveToEligibleSets}>
+              Apply to Eligible Sets
+            </Button>
+          )}
           <Button variant="ghost" icon="upload" onClick={beginImport}>
             Import Existing
           </Button>
@@ -1294,6 +1452,38 @@ function Builder({
                             {piece.repeats} × {piece.distance}
                             {piece.rest ? ` ${piece.rest}` : ""}
                           </span>
+                          {piece.adaptiveInterval?.enabled && (
+                            <span className="adaptive-summary">
+                              Adaptive · {piece.adaptiveInterval.goal}
+                              {piece.adaptiveInterval.recommendation?.accepted
+                                ? ` · ${piece.adaptiveInterval.recommendation.groups.length} groups`
+                                : " · needs review"}
+                            </span>
+                          )}
+                          {piece.kind === "circuit" && (
+                            <div className="builder-circuit-children">
+                              {piece.children?.map((child) => (
+                                <div key={child.id}>
+                                  <span>
+                                    {child.name} · {pieceYardageLabel(child)}
+                                  </span>
+                                  <button
+                                    onClick={() =>
+                                      setIntervalTarget({
+                                        piece: child,
+                                        sectionId: section.id,
+                                        parentPieceId: piece.id,
+                                      })
+                                    }
+                                  >
+                                    {child.adaptiveInterval?.enabled
+                                      ? "Edit intervals"
+                                      : "Add intervals"}
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                         <strong className="piece-yards">
                           {formatYards(yardage(piece))}
@@ -1310,6 +1500,17 @@ function Builder({
                             onClick={() => movePiece(section.id, index, 1)}
                           >
                             ↓
+                          </button>
+                          <button
+                            title="Adaptive intervals"
+                            onClick={() =>
+                              setIntervalTarget({
+                                piece,
+                                sectionId: section.id,
+                              })
+                            }
+                          >
+                            @
                           </button>
                           <button
                             title="Edit"
@@ -1395,7 +1596,7 @@ function PieceModal({
 }) {
   const [draft, setDraft] = useState<SetPiece>(
     modal.piece
-      ? { ...modal.piece }
+      ? JSON.parse(JSON.stringify(modal.piece))
       : {
           id: `p-${Date.now()}`,
           name: "",
@@ -1410,11 +1611,20 @@ function PieceModal({
   const [saveToLibrary, setSaveToLibrary] = useState(
     modal.libraryOnly ?? !modal.piece,
   )
+  const [selectedCircuitPiece, setSelectedCircuitPiece] = useState(
+    pieces[0]?.id ?? "",
+  )
+  const isCircuit = draft.kind === "circuit"
+  const circuitYardage = calculateCircuitYardage(draft)
   const draftYardage = calculatePieceYardage(draft)
   const save = () => {
     if (!draft.name.trim()) return
+    if (isCircuit && !draft.children?.length) return
     const finalDraft: SetPiece = {
       ...draft,
+      instructions: isCircuit
+        ? `${draft.rounds ?? 1} rounds: ${draft.children?.map((piece) => piece.name).join(" → ")}`
+        : draft.instructions,
       confidence: draftYardage.status === "resolved" ? "verified" : "missing",
       confidenceNote:
         draftYardage.status === "resolved" ? undefined : draftYardage.reason,
@@ -1465,7 +1675,7 @@ function PieceModal({
       className="modal-backdrop"
       onMouseDown={(event) => event.target === event.currentTarget && close()}
     >
-      <div className="modal">
+      <div className={`modal ${isCircuit ? "circuit-modal" : ""}`}>
         <div className="modal-header">
           <div>
             <span className="eyebrow">
@@ -1486,26 +1696,65 @@ function PieceModal({
               placeholder="e.g. Threshold 100s"
             />
           </label>
-          <label className="form-label wide">
-            <span>
-              Manual yardage override <em>Optional</em>
-            </span>
-            <div className="input-suffix">
-              <Field
-                type="number"
-                value={draft.manualYardage ?? ""}
-                onChange={(manualYardage) =>
-                  setDraft({
-                    ...draft,
-                    manualYardage:
-                      manualYardage === "" ? undefined : Number(manualYardage),
-                  })
-                }
-                placeholder="Use only when the set cannot be expressed as repeats × distance"
-              />
-              <span>yd</span>
-            </div>
-          </label>
+          <div className="piece-type-switch wide">
+            <button
+              className={!isCircuit ? "active" : ""}
+              onClick={() =>
+                setDraft({
+                  ...draft,
+                  kind: "set",
+                  children: undefined,
+                  rounds: undefined,
+                  restBetweenPieces: undefined,
+                  restBetweenRounds: undefined,
+                  restAfterFinalRound: undefined,
+                  distance: draft.distance || 100,
+                })
+              }
+            >
+              Standard Set
+            </button>
+            <button
+              className={isCircuit ? "active" : ""}
+              onClick={() =>
+                setDraft({
+                  ...draft,
+                  kind: "circuit",
+                  repeats: 1,
+                  distance: 0,
+                  rounds: draft.rounds ?? 2,
+                  children: draft.children ?? [],
+                  unit: "yards",
+                })
+              }
+            >
+              Create Circuit
+            </button>
+          </div>
+          {!isCircuit && (
+            <label className="form-label wide">
+              <span>
+                Manual yardage override <em>Optional</em>
+              </span>
+              <div className="input-suffix">
+                <Field
+                  type="number"
+                  value={draft.manualYardage ?? ""}
+                  onChange={(manualYardage) =>
+                    setDraft({
+                      ...draft,
+                      manualYardage:
+                        manualYardage === ""
+                          ? undefined
+                          : Number(manualYardage),
+                    })
+                  }
+                  placeholder="Use only when the set cannot be expressed as repeats × distance"
+                />
+                <span>yd</span>
+              </div>
+            </label>
+          )}
           <label className="form-label wide">
             <span>Category</span>
             <select
@@ -1519,97 +1768,387 @@ function PieceModal({
               ))}
             </select>
           </label>
-          <label className="form-label wide">
-            <span>Swim instructions</span>
-            <textarea
-              rows={5}
-              value={draft.instructions}
-              onChange={(event) =>
-                setDraft({ ...draft, instructions: event.target.value })
-              }
-              placeholder={
-                "10 × 100 Freestyle @ 1:30\nHold a strong, consistent pace"
-              }
-            />
-            <small>Use multiple lines for complex sets.</small>
-          </label>
-          <div className="form-grid">
-            <label className="form-label">
-              <span>Repeat count</span>
-              <Field
-                type="number"
-                value={draft.repeats}
-                onChange={(repeats) =>
-                  setDraft({ ...draft, repeats: Math.max(1, Number(repeats)) })
-                }
-              />
-            </label>
-            <label className="form-label">
-              <span>Distance per rep</span>
-              <div className="input-suffix">
-                <Field
-                  type="number"
-                  value={draft.distance}
-                  onChange={(distance) =>
+          {isCircuit && (
+            <div className="circuit-editor wide">
+              <div className="circuit-config-grid">
+                <label className="form-label">
+                  <span>Number of rounds</span>
+                  <Field
+                    type="number"
+                    value={draft.rounds ?? 1}
+                    onChange={(rounds) =>
+                      setDraft({
+                        ...draft,
+                        rounds: Math.max(1, Number(rounds)),
+                      })
+                    }
+                  />
+                </label>
+                <label className="form-label">
+                  <span>Rest between pieces</span>
+                  <Field
+                    value={draft.restBetweenPieces ?? ""}
+                    onChange={(restBetweenPieces) =>
+                      setDraft({ ...draft, restBetweenPieces })
+                    }
+                    placeholder="e.g. 10 seconds"
+                  />
+                </label>
+                <label className="form-label">
+                  <span>Rest between rounds</span>
+                  <Field
+                    value={draft.restBetweenRounds ?? ""}
+                    onChange={(restBetweenRounds) =>
+                      setDraft({ ...draft, restBetweenRounds })
+                    }
+                    placeholder="e.g. 30 seconds"
+                  />
+                </label>
+                <label className="toggle-row compact">
+                  <input
+                    type="checkbox"
+                    checked={draft.restAfterFinalRound ?? false}
+                    onChange={(event) =>
+                      setDraft({
+                        ...draft,
+                        restAfterFinalRound: event.target.checked,
+                      })
+                    }
+                  />
+                  <span className="toggle" />
+                  <span>
+                    <strong>Rest after final round</strong>
+                  </span>
+                </label>
+              </div>
+              <div className="circuit-add-row">
+                <select
+                  value={selectedCircuitPiece}
+                  onChange={(event) =>
+                    setSelectedCircuitPiece(event.target.value)
+                  }
+                >
+                  {pieces.map((piece) => (
+                    <option key={piece.id} value={piece.id}>
+                      {piece.name} · {pieceYardageLabel(piece)}
+                    </option>
+                  ))}
+                </select>
+                <Button
+                  variant="secondary"
+                  icon="plus"
+                  onClick={() => {
+                    const selected = pieces.find(
+                      (piece) => piece.id === selectedCircuitPiece,
+                    )
+                    if (selected) {
+                      setDraft({
+                        ...draft,
+                        children: [
+                          ...(draft.children ?? []),
+                          copyPiece(selected),
+                        ],
+                      })
+                    }
+                  }}
+                >
+                  Add from Library
+                </Button>
+                <Button
+                  variant="ghost"
+                  icon="plus"
+                  onClick={() =>
                     setDraft({
                       ...draft,
-                      distance: Math.max(0, Number(distance)),
+                      children: [
+                        ...(draft.children ?? []),
+                        {
+                          id: `circuit-child-${Date.now()}`,
+                          name: "New Circuit Piece",
+                          category: draft.category,
+                          instructions: "1 x 100",
+                          repeats: 1,
+                          distance: 100,
+                          unit: "yards",
+                        },
+                      ],
+                    })
+                  }
+                >
+                  Custom Piece
+                </Button>
+              </div>
+              <div className="circuit-piece-list">
+                {!!draft.children?.length && (
+                  <div className="circuit-list-header">
+                    <span />
+                    <span>Set piece</span>
+                    <span>Reps</span>
+                    <span />
+                    <span>Distance</span>
+                    <span>Yardage</span>
+                    <span>Actions</span>
+                  </div>
+                )}
+                {(draft.children ?? []).map((child, index) => (
+                  <div className="circuit-piece-row" key={child.id}>
+                    <span className="grip">
+                      <Icon name="grip" />
+                    </span>
+                    <Field
+                      value={child.name}
+                      onChange={(name) =>
+                        setDraft({
+                          ...draft,
+                          children: draft.children?.map((item) =>
+                            item.id === child.id ? { ...item, name } : item,
+                          ),
+                        })
+                      }
+                    />
+                    <Field
+                      type="number"
+                      value={child.repeats}
+                      onChange={(repeats) =>
+                        setDraft({
+                          ...draft,
+                          children: draft.children?.map((item) =>
+                            item.id === child.id
+                              ? {
+                                  ...item,
+                                  repeats: Math.max(1, Number(repeats)),
+                                }
+                              : item,
+                          ),
+                        })
+                      }
+                    />
+                    <span>×</span>
+                    <Field
+                      type="number"
+                      value={child.distance}
+                      onChange={(distance) =>
+                        setDraft({
+                          ...draft,
+                          children: draft.children?.map((item) =>
+                            item.id === child.id
+                              ? {
+                                  ...item,
+                                  distance: Math.max(0, Number(distance)),
+                                }
+                              : item,
+                          ),
+                        })
+                      }
+                    />
+                    <strong>{pieceYardageLabel(child)}</strong>
+                    <button
+                      title="Move up"
+                      onClick={() => {
+                        if (index === 0) return
+                        const children = [...(draft.children ?? [])]
+                        ;[children[index - 1], children[index]] = [
+                          children[index],
+                          children[index - 1],
+                        ]
+                        setDraft({ ...draft, children })
+                      }}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      title="Move down"
+                      onClick={() => {
+                        if (index === (draft.children?.length ?? 0) - 1) return
+                        const children = [...(draft.children ?? [])]
+                        ;[children[index], children[index + 1]] = [
+                          children[index + 1],
+                          children[index],
+                        ]
+                        setDraft({ ...draft, children })
+                      }}
+                    >
+                      ↓
+                    </button>
+                    <button
+                      title="Duplicate"
+                      onClick={() => {
+                        const children = [...(draft.children ?? [])]
+                        children.splice(index + 1, 0, copyPiece(child))
+                        setDraft({ ...draft, children })
+                      }}
+                    >
+                      <Icon name="duplicate" size={15} />
+                    </button>
+                    <button
+                      title="Save child as new library template"
+                      onClick={() => {
+                        setPieces([copyPiece(child), ...pieces])
+                        showNotice(`${child.name} saved to the library`)
+                      }}
+                    >
+                      <Icon name="library" size={15} />
+                    </button>
+                    <button
+                      title="Remove"
+                      onClick={() =>
+                        setDraft({
+                          ...draft,
+                          children: draft.children?.filter(
+                            (item) => item.id !== child.id,
+                          ),
+                        })
+                      }
+                    >
+                      <Icon name="trash" size={15} />
+                    </button>
+                  </div>
+                ))}
+                {!draft.children?.length && (
+                  <div className="circuit-empty">
+                    Add at least one library or custom piece to the circuit.
+                  </div>
+                )}
+              </div>
+              <div className="circuit-summary">
+                <span>
+                  <strong>{draft.rounds ?? 1}</strong> rounds
+                </span>
+                <span>
+                  <strong>
+                    {circuitYardage.perRound.status === "resolved"
+                      ? formatYards(circuitYardage.perRound.yards)
+                      : "Unresolved"}
+                  </strong>{" "}
+                  per round
+                </span>
+                <span>
+                  <strong>
+                    {circuitYardage.total.status === "resolved"
+                      ? formatYards(circuitYardage.total.yards)
+                      : "Unresolved"}
+                  </strong>{" "}
+                  total
+                </span>
+              </div>
+            </div>
+          )}
+          {!isCircuit && (
+            <label className="form-label wide">
+              <span>Swim instructions</span>
+              <textarea
+                rows={5}
+                value={draft.instructions}
+                onChange={(event) =>
+                  setDraft({ ...draft, instructions: event.target.value })
+                }
+                placeholder={
+                  "10 × 100 Freestyle @ 1:30\nHold a strong, consistent pace"
+                }
+              />
+              <small>Use multiple lines for complex sets.</small>
+            </label>
+          )}
+          {isCircuit && (
+            <label className="form-label wide">
+              <span>
+                Circuit notes <em>Optional</em>
+              </span>
+              <textarea
+                rows={3}
+                value={draft.notes ?? ""}
+                onChange={(event) =>
+                  setDraft({ ...draft, notes: event.target.value })
+                }
+                placeholder="Coaching focus or transition instructions"
+              />
+            </label>
+          )}
+          {!isCircuit && (
+            <div className="form-grid">
+              <label className="form-label">
+                <span>Repeat count</span>
+                <Field
+                  type="number"
+                  value={draft.repeats}
+                  onChange={(repeats) =>
+                    setDraft({
+                      ...draft,
+                      repeats: Math.max(1, Number(repeats)),
                     })
                   }
                 />
-                <span>yd</span>
-              </div>
-            </label>
-            <label className="form-label">
-              <span>Distance unit</span>
-              <select
-                value={draft.unit ?? "yards"}
-                onChange={(event) =>
-                  setDraft({
-                    ...draft,
-                    unit: event.target.value as "yards" | "meters" | "unknown",
-                    children: draft.children?.map((piece) => ({
-                      ...piece,
+              </label>
+              <label className="form-label">
+                <span>Distance per rep</span>
+                <div className="input-suffix">
+                  <Field
+                    type="number"
+                    value={draft.distance}
+                    onChange={(distance) =>
+                      setDraft({
+                        ...draft,
+                        distance: Math.max(0, Number(distance)),
+                      })
+                    }
+                  />
+                  <span>yd</span>
+                </div>
+              </label>
+              <label className="form-label">
+                <span>Distance unit</span>
+                <select
+                  value={draft.unit ?? "yards"}
+                  onChange={(event) =>
+                    setDraft({
+                      ...draft,
                       unit: event.target
                         .value as "yards" | "meters" | "unknown",
-                    })),
-                    betweenRounds: draft.betweenRounds?.map((piece) => ({
-                      ...piece,
-                      unit: event.target
-                        .value as "yards" | "meters" | "unknown",
-                    })),
-                  })
-                }
-              >
-                <option value="yards">Yards</option>
-                <option value="meters">Meters</option>
-                <option value="unknown">Unknown</option>
-              </select>
-            </label>
-            <label className="form-label">
-              <span>Rest / interval</span>
+                      children: draft.children?.map((piece) => ({
+                        ...piece,
+                        unit: event.target
+                          .value as "yards" | "meters" | "unknown",
+                      })),
+                      betweenRounds: draft.betweenRounds?.map((piece) => ({
+                        ...piece,
+                        unit: event.target
+                          .value as "yards" | "meters" | "unknown",
+                      })),
+                    })
+                  }
+                >
+                  <option value="yards">Yards</option>
+                  <option value="meters">Meters</option>
+                  <option value="unknown">Unknown</option>
+                </select>
+              </label>
+              <label className="form-label">
+                <span>Rest / interval</span>
+                <Field
+                  value={draft.rest ?? ""}
+                  onChange={(rest) => setDraft({ ...draft, rest })}
+                  placeholder="@ 1:30"
+                />
+              </label>
+            </div>
+          )}
+          {!isCircuit && (
+            <label className="form-label wide">
+              <span>
+                Coach notes <em>Optional</em>
+              </span>
               <Field
-                value={draft.rest ?? ""}
-                onChange={(rest) => setDraft({ ...draft, rest })}
-                placeholder="@ 1:30"
+                value={draft.notes ?? ""}
+                onChange={(notes) => setDraft({ ...draft, notes })}
+                placeholder="Equipment, stroke, or coaching cues"
               />
             </label>
-          </div>
-          <label className="form-label wide">
-            <span>
-              Coach notes <em>Optional</em>
-            </span>
-            <Field
-              value={draft.notes ?? ""}
-              onChange={(notes) => setDraft({ ...draft, notes })}
-              placeholder="Equipment, stroke, or coaching cues"
-            />
-          </label>
+          )}
           <div className="calculation">
             <div>
               <span>Calculated yardage</span>
               <small>
-                {draft.kind === "rounds"
+                {draft.kind === "rounds" || draft.kind === "circuit"
                   ? `${draft.rounds} rounds with ${draft.children?.length ?? 0} nested set(s)`
                   : `${draft.repeats} repeats × ${draft.distance} ${draft.unit ?? "yards"}`}
               </small>
@@ -3010,6 +3549,9 @@ function Preview({
   navigate: (p: Page) => void
   showNotice: (m: string) => void
 }) {
+  const [intervalDisplay, setIntervalDisplay] =
+    useState<"all" | "selected" | "compact" | "none">("compact")
+  const [selectedGroupIndex, setSelectedGroupIndex] = useState(0)
   const print = () => {
     showNotice("PDF export ready")
     window.setTimeout(() => window.print(), 300)
@@ -3027,6 +3569,35 @@ function Preview({
         <div>
           <span>Print preview</span>
           <small>US Letter · Portrait</small>
+          <div className="pdf-interval-options">
+            <select
+              value={intervalDisplay}
+              onChange={(event) =>
+                setIntervalDisplay(
+                  event.target.value as "all" | "selected" | "compact" | "none",
+                )
+              }
+            >
+              <option value="all">All interval groups</option>
+              <option value="selected">Selected group only</option>
+              <option value="compact">Compact interval table</option>
+              <option value="none">Hide adaptive intervals</option>
+            </select>
+            {intervalDisplay === "selected" && (
+              <select
+                value={selectedGroupIndex}
+                onChange={(event) =>
+                  setSelectedGroupIndex(Number(event.target.value))
+                }
+              >
+                <option value={0}>Faster / Group 1</option>
+                <option value={1}>Middle / Group 2</option>
+                <option value={2}>Slower / Group 3</option>
+                <option value={3}>Group 4</option>
+                <option value={4}>Group 5</option>
+              </select>
+            )}
+          </div>
         </div>
         <Button icon="download" onClick={print}>
           Export PDF
@@ -3041,7 +3612,10 @@ function Preview({
                 <span />
                 <span />
               </span>
-              <span>SWIMFLOW</span>
+              <span className="paper-brand-copy">
+                <strong>LANELINK</strong>
+                <small>CONNECT. CREATE. COACH.</small>
+              </span>
             </div>
             <span>North Shore Aquatics</span>
           </header>
@@ -3072,7 +3646,64 @@ function Preview({
                       <div>
                         <strong>{piece.name}</strong>
                         <p>{piece.instructions}</p>
+                        {piece.kind === "circuit" && (
+                          <div className="paper-circuit">
+                            <strong>
+                              {piece.rounds} rounds ·{" "}
+                              {formatYards(
+                                piece.children?.reduce(
+                                  (sum, child) => sum + yardage(child),
+                                  0,
+                                ) ?? 0,
+                              )}{" "}
+                              per round
+                            </strong>
+                            {circuitPrintLines(
+                              piece,
+                              intervalDisplay,
+                              selectedGroupIndex,
+                            ).map((line) => (
+                              <span key={line}>{line}</span>
+                            ))}
+                            {piece.restBetweenPieces && (
+                              <span>
+                                Between pieces: {piece.restBetweenPieces}
+                              </span>
+                            )}
+                            {piece.restBetweenRounds && (
+                              <span>
+                                Between rounds: {piece.restBetweenRounds}
+                                {piece.restAfterFinalRound
+                                  ? " (including final round)"
+                                  : ""}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         {piece.rest && <small>Interval: {piece.rest}</small>}
+                        {intervalDisplay !== "none" &&
+                          piece.adaptiveInterval?.recommendation?.accepted && (
+                            <div
+                              className={`paper-intervals ${intervalDisplay}`}
+                            >
+                              <strong>Adaptive send-offs</strong>
+                              {intervalGroupsForPrint(
+                                piece,
+                                intervalDisplay,
+                                selectedGroupIndex,
+                              ).map((group) => (
+                                <span key={group.id}>
+                                  {group.name}:{" "}
+                                  {Math.floor(group.sendOffSeconds / 60)}:
+                                  {String(
+                                    Math.round(group.sendOffSeconds % 60),
+                                  ).padStart(2, "0")}
+                                  {intervalDisplay === "all" &&
+                                    ` · ${group.swimmerIds.length} swimmers · ${Math.round(group.restRange[0])}-${Math.round(group.restRange[1])} sec rest`}
+                                </span>
+                              ))}
+                            </div>
+                          )}
                         {piece.notes && <em>Coach note: {piece.notes}</em>}
                       </div>
                       <strong>{formatYards(yardage(piece))}</strong>
@@ -3086,7 +3717,7 @@ function Preview({
           </div>
           <footer className="paper-footer">
             <span>Coach Marcus Chen · North Shore Aquatics</span>
-            <span>Generated with SwimFlow</span>
+            <span>Generated with LaneLink</span>
           </footer>
         </article>
       </div>

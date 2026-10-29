@@ -11,7 +11,11 @@ export function calculatePieceYardage(piece: SetPiece): YardageResult {
     return { status: "resolved", yards: piece.manualYardage }
   }
 
-  if (piece.kind === "rounds" || piece.children?.length) {
+  if (
+    piece.kind === "rounds" ||
+    piece.kind === "circuit" ||
+    piece.children?.length
+  ) {
     if (!piece.rounds || !piece.children?.length) {
       return {
         status: "unresolved",
@@ -66,6 +70,40 @@ export function calculatePieceYardage(piece: SetPiece): YardageResult {
       piece.unit === "meters"
         ? "Meter distances are not converted to yards automatically."
         : "Distance unit must be confirmed.",
+  }
+}
+
+export function calculateCircuitYardage(
+  piece: SetPiece,
+): {
+  perRound: YardageResult
+  total: YardageResult
+} {
+  if (piece.kind !== "circuit" || !piece.children?.length || !piece.rounds) {
+    const unresolved: YardageResult = {
+      status: "unresolved",
+      yards: null,
+      reason: "Circuit requires at least one piece and one round.",
+    }
+    return { perRound: unresolved, total: unresolved }
+  }
+  const childResults = piece.children.map(calculatePieceYardage)
+  const unresolved = childResults.find(
+    (result) => result.status === "unresolved",
+  )
+  if (unresolved?.status === "unresolved") {
+    return { perRound: unresolved, total: unresolved }
+  }
+  const perRoundYards = childResults.reduce(
+    (sum, result) => sum + (result.status === "resolved" ? result.yards : 0),
+    0,
+  )
+  return {
+    perRound: { status: "resolved", yards: perRoundYards },
+    total: {
+      status: "resolved",
+      yards: perRoundYards * piece.rounds,
+    },
   }
 }
 
