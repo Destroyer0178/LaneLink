@@ -73,7 +73,7 @@ function stripListPrefix(line: string): string {
 
 function parseSectionHeading(
   line: string,
-): { name: string category: Category remainder: string } | null {
+): { name: string; category: Category; remainder: string } | null {
   const match = line.match(/^([^:]+):\s*(.*)$/)
   const candidate = (match?.[1] ?? line).trim()
   const alias = SECTION_ALIASES.find(({ pattern }) => pattern.test(candidate))
@@ -268,7 +268,7 @@ function parseSetLine(
 
 export function parseWorkoutText(
   originalText: string,
-  options: { filename?: string date?: string } = {},
+  options: { filename?: string; date?: string } = {},
 ): ParsedWorkout {
   idCounter = 0
   const normalizedText = normalizeWorkoutText(originalText)
