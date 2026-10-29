@@ -10,7 +10,7 @@ import type {
   TrainingGoal,
 } from "./types"
 
-export type TimeValidation = { valid: true seconds: number } | {
+export type TimeValidation = { valid: true; seconds: number } | {
   valid: false
   error: string
 }
