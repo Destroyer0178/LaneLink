@@ -156,7 +156,18 @@ const pieceYardageLabel = (piece: SetPiece) => {
   const result = calculatePieceYardage(piece)
   return result.status === "resolved" ? formatYards(result.yards) : "Unresolved"
 }
-const today = () => new Date().toISOString().slice(0, 10)
+const todayWithDay = () =>
+  new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  }).format(new Date())
+const today = () =>
+  new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(new Date())
 const initialsFor = (name: string) =>
   name
     .split(/\s+/)
@@ -842,6 +853,7 @@ function PlannerApp() {
             openWorkout={openWorkout}
             navigate={navigate}
             beginImport={() => beginImport()}
+            todayWithDay={todayWithDay}
           />
         )}
         {page === "builder" && (
@@ -1107,6 +1119,7 @@ function Dashboard({
   openWorkout,
   navigate,
   beginImport,
+  todayWithDay,
 }: {
   workouts: Workout[]
   pieces: SetPiece[]
@@ -1116,6 +1129,7 @@ function Dashboard({
   openWorkout: (w: Workout) => void
   navigate: (p: Page) => void
   beginImport: () => void
+  todayWithDay: () => string
 }) {
   const { profile } = useAuth()
   const firstName = profile?.display_name.split(/\s+/)[0] || "Coach"
@@ -1123,7 +1137,7 @@ function Dashboard({
     <div className="page-content">
       <section className="welcome-row">
         <div>
-          <span className="date-label">MONDAY, MAY 19</span>
+          <span className="date-label">{todayWithDay()}</span>
           <h1>Good morning, {firstName}</h1>
           <p>Here’s what’s happening across your workout library.</p>
         </div>
