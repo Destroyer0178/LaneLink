@@ -1138,7 +1138,7 @@ function Dashboard({
       <section className="welcome-row">
         <div>
           <span className="date-label">{todayWithDay()}</span>
-          <h1>Good morning, {firstName}</h1>
+          <h1>Hello, {firstName}</h1>
           <p>Here’s what’s happening across your workout library.</p>
         </div>
         <div className="heading-actions">
@@ -1154,7 +1154,7 @@ function Dashboard({
         <StatCard
           label="Saved workouts"
           value={`${workouts.length}`}
-          detail="+2 this month"
+          detail=""
         />
         <StatCard
           label="Combined yardage"
@@ -1169,7 +1169,7 @@ function Dashboard({
         <StatCard
           label="Reusable pieces"
           value={`${pieces.length}`}
-          detail="Across 7 categories"
+          detail=""
         />
       </section>
       <div className="dashboard-grid">
