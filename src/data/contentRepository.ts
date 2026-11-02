@@ -7,6 +7,9 @@ type SetRow = {
   name: string
   description: string
   structure: Record<string, unknown>
+  visibility: "private" | "public"
+  source_creator_display_name: string | null
+  source_creator_organization: string | null
 }
 
 type PieceRow = {
@@ -15,6 +18,52 @@ type PieceRow = {
   name: string
   category: SetPiece["category"]
   structure: Record<string, unknown>
+  visibility: "private" | "public"
+  source_creator_display_name: string | null
+  source_creator_organization: string | null
+}
+
+export type PublicLibraryItem = {
+  id: string
+  type: "set" | "piece"
+  name: string
+  description: string
+  category: SetPiece["category"] | null
+  creatorDisplayName: string
+  creatorOrganization: string
+  createdAt: string
+  updatedAt: string
+  inCollection: boolean
+  isOwn: boolean
+  content: Workout | SetPiece
+}
+
+export type PublicLibraryFilters = {
+  type: "set" | "piece"
+  query?: string
+  stroke?: string
+  distance?: number
+  goal?: string
+  equipment?: string
+  sort?: "newest" | "alphabetical"
+  page?: number
+  pageSize?: number
+}
+
+type PublicLibraryRow = {
+  id: string
+  item_type: "set" | "piece"
+  name: string
+  description: string
+  category: SetPiece["category"] | null
+  structure: Record<string, unknown>
+  creator_display_name: string
+  creator_organization: string
+  created_at: string
+  updated_at: string
+  in_collection: boolean
+  is_own: boolean
+  total_count: number
 }
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
@@ -29,6 +78,9 @@ function workoutFromRow(row: SetRow): Workout {
     id: row.id,
     title: row.name,
     description: row.description,
+    visibility: row.visibility,
+    sourceCreatorDisplayName: row.source_creator_display_name ?? undefined,
+    sourceCreatorOrganization: row.source_creator_organization ?? undefined,
   }
 }
 
@@ -38,11 +90,16 @@ function pieceFromRow(row: PieceRow): SetPiece {
     id: row.id,
     name: row.name,
     category: row.category,
+    visibility: row.visibility,
+    sourceCreatorDisplayName: row.source_creator_display_name ?? undefined,
+    sourceCreatorOrganization: row.source_creator_organization ?? undefined,
   }
 }
 
-const setColumns = "id, owner_id, name, description, structure"
-const pieceColumns = "id, owner_id, name, category, structure"
+const setColumns =
+  "id, owner_id, name, description, structure, visibility, source_creator_display_name, source_creator_organization"
+const pieceColumns =
+  "id, owner_id, name, category, structure, visibility, source_creator_display_name, source_creator_organization"
 
 export async function listOwnSets(ownerId: string, query = "") {
   let request = requireSupabase()
@@ -70,6 +127,170 @@ export async function listOwnPieces(ownerId: string, query = "") {
   const { data, error } = await request
   if (error) throw error
   return (data as PieceRow[]).map(pieceFromRow)
+}
+
+export async function listPublicLibrary(filters: PublicLibraryFilters) {
+  const pageSize = Math.min(Math.max(filters.pageSize ?? 12, 1), 50)
+  const page = Math.max(filters.page ?? 1, 1)
+  const { data, error } = await requireSupabase().rpc("search_public_library", {
+    p_item_type: filters.type,
+    p_query: filters.query?.trim() ?? "",
+    p_stroke: filters.stroke ?? "",
+    p_distance: filters.distance ?? null,
+    p_goal: filters.goal ?? "",
+    p_equipment: filters.equipment ?? "",
+    p_sort: filters.sort ?? "newest",
+    p_limit: pageSize,
+    p_offset: (page - 1) * pageSize,
+  })
+  if (error) throw error
+  const rows = (data ?? []) as PublicLibraryRow[]
+  return {
+    items: rows.map(
+      (row): PublicLibraryItem => ({
+        id: row.id,
+        type: row.item_type,
+        name: row.name,
+        description: row.description,
+        category: row.category,
+        creatorDisplayName: row.creator_display_name || "LaneLink Coach",
+        creatorOrganization: row.creator_organization || "",
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        inCollection: row.in_collection,
+        isOwn: row.is_own,
+        content:
+          row.item_type === "set"
+            ? workoutFromRow({
+                id: row.id,
+                owner_id: "",
+                name: row.name,
+                description: row.description,
+                structure: row.structure,
+                visibility: "public",
+                source_creator_display_name: null,
+                source_creator_organization: null,
+              })
+            : pieceFromRow({
+                id: row.id,
+                owner_id: "",
+                name: row.name,
+                category: row.category!,
+                structure: row.structure,
+                visibility: "public",
+                source_creator_display_name: null,
+                source_creator_organization: null,
+              }),
+      }),
+    ),
+    total: Number(rows[0]?.total_count ?? 0),
+  }
+}
+
+export async function savePublicLibraryItem(
+  coachId: string,
+  type: "set" | "piece",
+  itemId: string,
+) {
+  const table = type === "set" ? "saved_sets" : "saved_pieces"
+  const itemColumn = type === "set" ? "set_id" : "piece_id"
+  const { error } = await requireSupabase()
+    .from(table)
+    .insert({ coach_id: coachId, [itemColumn]: itemId })
+  if (error?.code === "23505") return "already-saved" as const
+  if (error) throw error
+  return "saved" as const
+}
+
+export async function setContentVisibility(
+  ownerId: string,
+  type: "set" | "piece",
+  itemId: string,
+  visibility: "private" | "public",
+) {
+  const table = type === "set" ? "sets" : "set_pieces"
+  const { data, error } = await requireSupabase()
+    .from(table)
+    .update({ visibility })
+    .eq("id", itemId)
+    .eq("owner_id", ownerId)
+    .select("id, visibility")
+    .maybeSingle()
+  if (error) throw error
+  if (!data) {
+    throw new Error("This item was not found or you cannot change it.")
+  }
+  return data.visibility as "private" | "public"
+}
+
+type DuplicatedPublicRow = {
+  id: string
+  item_type: "set" | "piece"
+  name: string
+  description: string
+  category: SetPiece["category"] | null
+  structure: Record<string, unknown>
+  visibility: "private"
+  source_creator_display_name: string
+  source_creator_organization: string
+}
+
+export async function duplicatePublicLibraryItem(
+  type: "set" | "piece",
+  itemId: string,
+) {
+  const { data, error } = await requireSupabase().rpc(
+    "duplicate_public_library_item",
+    {
+      p_item_type: type,
+      p_item_id: itemId,
+    },
+  )
+  if (error) throw error
+  const row = data as DuplicatedPublicRow
+  if (row.item_type === "set") {
+    return {
+      type: "set" as const,
+      item: workoutFromRow({
+        id: row.id,
+        owner_id: "",
+        name: row.name,
+        description: row.description,
+        structure: row.structure,
+        visibility: row.visibility,
+        source_creator_display_name: row.source_creator_display_name,
+        source_creator_organization: row.source_creator_organization,
+      }),
+    }
+  }
+  return {
+    type: "piece" as const,
+    item: pieceFromRow({
+      id: row.id,
+      owner_id: "",
+      name: row.name,
+      category: row.category!,
+      structure: row.structure,
+      visibility: row.visibility,
+      source_creator_display_name: row.source_creator_display_name,
+      source_creator_organization: row.source_creator_organization,
+    }),
+  }
+}
+
+export async function removePublicLibraryItem(
+  coachId: string,
+  type: "set" | "piece",
+  itemId: string,
+) {
+  const table = type === "set" ? "saved_sets" : "saved_pieces"
+  const itemColumn = type === "set" ? "set_id" : "piece_id"
+  const { error } = await requireSupabase()
+    .from(table)
+    .delete()
+    .eq("coach_id", coachId)
+    .eq(itemColumn, itemId)
+  if (error) throw error
 }
 
 export async function createSet(

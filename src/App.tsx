@@ -12,13 +12,19 @@ import {
   deletePiece,
   deleteSet,
   duplicatePiece as duplicateStoredPiece,
+  duplicatePublicLibraryItem,
   duplicateSet as duplicateStoredSet,
+  listPublicLibrary,
   listOwnPieces,
   listOwnSets,
   migrateLegacyContent,
+  removePublicLibraryItem,
+  savePublicLibraryItem,
+  setContentVisibility,
   updatePiece,
   updateSet,
 } from "./data/contentRepository"
+import type { PublicLibraryItem } from "./data/contentRepository"
 import { extractDocx } from "./import/documentExtraction"
 import { ImportSourcePreview } from "./import/ImportSourcePreview"
 import { NestedSetSummary } from "./import/NestedSetSummary"
@@ -42,7 +48,7 @@ import { AdaptiveIntervalsModal } from "./workout/AdaptiveIntervalsModal"
 import { recommendIntervals } from "./workout/intervals"
 import { circuitPrintLines, intervalGroupsForPrint } from "./workout/print"
 
-type Page = "dashboard" | "builder" | "workouts" | "library" | "account" | "preview" | "import"
+type Page = "dashboard" | "builder" | "workouts" | "library" | "public-library" | "account" | "preview" | "import"
 type ImportStep = "upload" | "processing" | "review" | "save" | "success"
 
 type ImportSource = {
@@ -291,6 +297,12 @@ function Icon({ name, size = 18 }: { name: string; size?: number }) {
     library: (
       <>
         <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v16H6.5A2.5 2.5 0 0 0 4 21.5zM20 5.5A2.5 2.5 0 0 0 17.5 3H13v16h4.5a2.5 2.5 0 0 1 2.5 2.5z" />
+      </>
+    ),
+    globe: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" />
       </>
     ),
     account: (
@@ -596,6 +608,7 @@ function PlannerApp() {
       builder: "Workout Builder",
       workouts: "My Sets",
       library: "My Pieces",
+      "public-library": "Public Library",
       account: "Account Settings",
       preview: "Print Preview",
       import: "Import Workout",
@@ -742,6 +755,67 @@ function PlannerApp() {
     showNotice("Set piece deleted")
   }
 
+  const changeVisibility = async (
+    type: "set" | "piece",
+    item: Workout | SetPiece,
+  ) => {
+    const currentVisibility = item.visibility ?? "private"
+    const nextVisibility = currentVisibility === "public" ? "private" : "public"
+    if (
+      nextVisibility === "private" &&
+      !window.confirm(
+        "Make this item private? It will disappear from public discovery and all saved references to it will be removed. Independent duplicates will remain.",
+      )
+    ) {
+      return
+    }
+    const storedVisibility = await runOperation(
+      `visibility-${type}:${item.id}`,
+      () => setContentVisibility(ownerId, type, item.id, nextVisibility),
+    )
+    if (!storedVisibility) return
+    if (type === "set") {
+      setWorkouts((items) =>
+        items.map((workout) =>
+          workout.id === item.id
+            ? { ...workout, visibility: storedVisibility }
+            : workout,
+        ),
+      )
+    } else {
+      setPieces((items) =>
+        items.map((piece) =>
+          piece.id === item.id
+            ? { ...piece, visibility: storedVisibility }
+            : piece,
+        ),
+      )
+    }
+    showNotice(
+      storedVisibility === "public"
+        ? "Published to the Public Library"
+        : "Changed to private and removed saved references",
+    )
+  }
+
+  const duplicatePublicItem = async (item: PublicLibraryItem) => {
+    const duplicated = await runOperation(
+      `duplicate-public-${item.type}:${item.id}`,
+      () => duplicatePublicLibraryItem(item.type, item.id),
+    )
+    if (!duplicated) return
+    if (duplicated.type === "set") {
+      setWorkouts((items) => [duplicated.item, ...items])
+    } else {
+      setPieces((items) => [duplicated.item, ...items])
+    }
+    showNotice(
+      `Independent copy added to My ${
+        duplicated.type === "set" ? "Sets" : "Pieces"
+      }`,
+    )
+  }
+
   const searchSets = useCallback(
     (query: string) => listOwnSets(ownerId, query),
     [ownerId],
@@ -884,6 +958,7 @@ function PlannerApp() {
             openWorkout={openWorkout}
             onDuplicate={duplicateWorkout}
             onDelete={removeWorkout}
+            onVisibilityChange={(workout) => changeVisibility("set", workout)}
             searchSets={searchSets}
             pendingOperations={pendingOperations}
             showNotice={showNotice}
@@ -898,7 +973,16 @@ function PlannerApp() {
             startNew={startNew}
             onDuplicate={duplicateLibraryPiece}
             onDelete={removeLibraryPiece}
+            onVisibilityChange={(piece) => changeVisibility("piece", piece)}
             searchPieces={searchPieces}
+            pendingOperations={pendingOperations}
+          />
+        )}
+        {page === "public-library" && (
+          <PublicLibraryPage
+            ownerId={ownerId}
+            showNotice={showNotice}
+            onDuplicate={duplicatePublicItem}
             pendingOperations={pendingOperations}
           />
         )}
@@ -1029,6 +1113,7 @@ function Sidebar({
     { page: "builder", label: "Workout Builder", icon: "builder" },
     { page: "workouts", label: "My Sets", icon: "workouts" },
     { page: "library", label: "My Pieces", icon: "library" },
+    { page: "public-library", label: "Public Library", icon: "globe" },
   ]
   return (
     <aside className="sidebar">
@@ -1089,6 +1174,7 @@ function Topbar({ page }: { page: Page }) {
     builder: "Workout Builder",
     workouts: "My Sets",
     library: "My Pieces",
+    "public-library": "Public Library",
     account: "Account Settings",
     preview: "Print Preview",
     import: "Import Workout",
@@ -1138,7 +1224,7 @@ function Dashboard({
       <section className="welcome-row">
         <div>
           <span className="date-label">{todayWithDay()}</span>
-          <h1>Hello, {firstName}</h1>
+          <h1>Good morning, {firstName}</h1>
           <p>Here’s what’s happening across your workout library.</p>
         </div>
         <div className="heading-actions">
@@ -1154,7 +1240,7 @@ function Dashboard({
         <StatCard
           label="Saved workouts"
           value={`${workouts.length}`}
-          detail=""
+          detail="+2 this month"
         />
         <StatCard
           label="Combined yardage"
@@ -1169,7 +1255,7 @@ function Dashboard({
         <StatCard
           label="Reusable pieces"
           value={`${pieces.length}`}
-          detail=""
+          detail="Across 7 categories"
         />
       </section>
       <div className="dashboard-grid">
@@ -2529,6 +2615,7 @@ function WorkoutsPage({
   openWorkout,
   onDuplicate,
   onDelete,
+  onVisibilityChange,
   searchSets,
   pendingOperations,
   startNew,
@@ -2540,6 +2627,7 @@ function WorkoutsPage({
   openWorkout: (w: Workout, preview?: boolean) => void
   onDuplicate: (workout: Workout) => Promise<void>
   onDelete: (workout: Workout) => Promise<void>
+  onVisibilityChange: (workout: Workout) => Promise<void>
   searchSets: (query: string) => Promise<Workout[]>
   pendingOperations: Set<string>
   startNew: () => void
@@ -2670,7 +2758,19 @@ function WorkoutsPage({
                 </span>
                 <span>
                   <strong>{workout.title}</strong>
-                  <small>{workout.description || "No description"}</small>
+                  <small>
+                    {workout.description || "No description"}
+                    {workout.sourceCreatorDisplayName
+                      ? ` · From ${workout.sourceCreatorDisplayName}`
+                      : ""}
+                  </small>
+                  <span
+                    className={`visibility-status ${
+                      workout.visibility === "public" ? "public" : "private"
+                    }`}
+                  >
+                    {workout.visibility === "public" ? "Public" : "Private"}
+                  </span>
                 </span>
               </span>
               <span>{workout.created}</span>
@@ -2695,6 +2795,21 @@ function WorkoutsPage({
                 onClick={(event) => event.stopPropagation()}
               >
                 <button
+                  title={
+                    workout.visibility === "public"
+                      ? "Change to private"
+                      : "Publish to Public Library"
+                  }
+                  disabled={pendingOperations.has(
+                    `visibility-set:${workout.id}`,
+                  )}
+                  onClick={() =>
+                    void onVisibilityChange(workout).catch(() => {})
+                  }
+                >
+                  <Icon name="globe" />
+                </button>
+                <button
                   title="Preview PDF"
                   onClick={() => openWorkout(workout, true)}
                 >
@@ -2715,7 +2830,9 @@ function WorkoutsPage({
                   onClick={() => {
                     if (
                       window.confirm(
-                        `Delete “${workout.title}”? This cannot be undone.`,
+                        workout.visibility === "public"
+                          ? `Delete “${workout.title}”? It will disappear from the Public Library and saved references will be removed. Independent duplicates will remain.`
+                          : `Delete “${workout.title}”? This cannot be undone.`,
                       )
                     ) {
                       void onDelete(workout).catch(() => {})
@@ -2762,6 +2879,7 @@ function LibraryPage({
   startNew,
   onDuplicate,
   onDelete,
+  onVisibilityChange,
   searchPieces,
   pendingOperations,
 }: {
@@ -2775,6 +2893,7 @@ function LibraryPage({
   startNew: () => void
   onDuplicate: (piece: SetPiece) => Promise<void>
   onDelete: (piece: SetPiece) => Promise<void>
+  onVisibilityChange: (piece: SetPiece) => Promise<void>
   searchPieces: (query: string) => Promise<SetPiece[]>
   pendingOperations: Set<string>
 }) {
@@ -2875,13 +2994,27 @@ function LibraryPage({
           {filtered.map((piece) => (
             <article className="library-card" key={piece.id}>
               <div className="library-card-head">
-                <Badge category={piece.category} />
-                <button>
-                  <Icon name="more" />
-                </button>
+                <div className="library-card-badges">
+                  <Badge category={piece.category} />
+                  <span
+                    className={`visibility-status ${
+                      piece.visibility === "public" ? "public" : "private"
+                    }`}
+                  >
+                    {piece.visibility === "public" ? "Public" : "Private"}
+                  </span>
+                </div>
               </div>
               <h3>{piece.name}</h3>
               <p>{piece.instructions}</p>
+              {piece.sourceCreatorDisplayName && (
+                <span className="source-attribution">
+                  Duplicated from {piece.sourceCreatorDisplayName}
+                  {piece.sourceCreatorOrganization
+                    ? ` · ${piece.sourceCreatorOrganization}`
+                    : ""}
+                </span>
+              )}
               <div className="set-notation">
                 <span>
                   {piece.repeats} × {piece.distance}
@@ -2893,6 +3026,19 @@ function LibraryPage({
                 <Button variant="secondary" onClick={startNew}>
                   Use in Workout
                 </Button>
+                <button
+                  title={
+                    piece.visibility === "public"
+                      ? "Change to private"
+                      : "Publish to Public Library"
+                  }
+                  disabled={pendingOperations.has(
+                    `visibility-piece:${piece.id}`,
+                  )}
+                  onClick={() => void onVisibilityChange(piece).catch(() => {})}
+                >
+                  <Icon name="globe" />
+                </button>
                 <button
                   title="Edit"
                   onClick={() =>
@@ -2916,7 +3062,9 @@ function LibraryPage({
                   onClick={() => {
                     if (
                       window.confirm(
-                        `Delete “${piece.name}”? This cannot be undone.`,
+                        piece.visibility === "public"
+                          ? `Delete “${piece.name}”? It will disappear from the Public Library and saved references will be removed. Independent duplicates will remain.`
+                          : `Delete “${piece.name}”? This cannot be undone.`,
                       )
                     ) {
                       void onDelete(piece).catch(() => {})
@@ -2948,6 +3096,420 @@ function LibraryPage({
               Create Set Piece
             </Button>
           )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+const publicStrokeOptions = [
+  ["", "All strokes"],
+  ["freestyle", "Freestyle"],
+  ["backstroke", "Backstroke"],
+  ["breaststroke", "Breaststroke"],
+  ["butterfly", "Butterfly"],
+  ["individual medley", "Individual medley"],
+  ["kick", "Kick"],
+  ["pull", "Pull"],
+]
+
+const publicGoalOptions = [
+  ["", "All goals"],
+  ["recovery", "Recovery"],
+  ["aerobic", "Aerobic"],
+  ["threshold", "Threshold"],
+  ["speed", "Speed"],
+  ["custom", "Custom"],
+]
+
+function publicItemDistance(item: PublicLibraryItem) {
+  return item.type === "set"
+    ? workoutYardage(item.content as Workout)
+    : yardage(item.content as SetPiece)
+}
+
+function PublicLibraryPage({
+  ownerId,
+  showNotice,
+  onDuplicate,
+  pendingOperations,
+}: {
+  ownerId: string
+  showNotice: (message: string) => void
+  onDuplicate: (item: PublicLibraryItem) => Promise<void>
+  pendingOperations: Set<string>
+}) {
+  const [type, setType] = useState<"set" | "piece">("set")
+  const [query, setQuery] = useState("")
+  const [stroke, setStroke] = useState("")
+  const [distance, setDistance] = useState("")
+  const [goal, setGoal] = useState("")
+  const [equipment, setEquipment] = useState("")
+  const [sort, setSort] = useState<"newest" | "alphabetical">("newest")
+  const [page, setPage] = useState(1)
+  const [items, setItems] = useState<PublicLibraryItem[]>([])
+  const [total, setTotal] = useState(0)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState("")
+  const [savingId, setSavingId] = useState("")
+  const pageSize = 12
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError("")
+    try {
+      const result = await listPublicLibrary({
+        type,
+        query,
+        stroke,
+        distance: distance ? Number(distance) : undefined,
+        goal,
+        equipment,
+        sort,
+        page,
+        pageSize,
+      })
+      setItems(result.items)
+      setTotal(result.total)
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "The public library could not be loaded.",
+      )
+    } finally {
+      setLoading(false)
+    }
+  }, [distance, equipment, goal, page, query, sort, stroke, type])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void load(), query ? 250 : 0)
+    return () => window.clearTimeout(timer)
+  }, [load, query])
+
+  useEffect(() => {
+    setPage(1)
+  }, [type, stroke, distance, goal, equipment, sort])
+
+  const toggleSaved = async (item: PublicLibraryItem) => {
+    if (item.isOwn || savingId) return
+    setSavingId(item.id)
+    setError("")
+    try {
+      if (item.inCollection) {
+        await removePublicLibraryItem(ownerId, item.type, item.id)
+      } else {
+        const result = await savePublicLibraryItem(ownerId, item.type, item.id)
+        if (result === "already-saved") {
+          setItems((currentItems) =>
+            currentItems.map((currentItem) =>
+              currentItem.id === item.id
+                ? { ...currentItem, inCollection: true }
+                : currentItem,
+            ),
+          )
+          showNotice("This item is already in your collection")
+          return
+        }
+      }
+      setItems((currentItems) =>
+        currentItems.map((currentItem) =>
+          currentItem.id === item.id
+            ? { ...currentItem, inCollection: !item.inCollection }
+            : currentItem,
+        ),
+      )
+      showNotice(
+        item.inCollection
+          ? "Removed from your public collection"
+          : "Saved to your public collection",
+      )
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "Your collection could not be updated.",
+      )
+    } finally {
+      setSavingId("")
+    }
+  }
+
+  const pageCount = Math.max(1, Math.ceil(total / pageSize))
+  return (
+    <div className="page-content public-library-page">
+      <section className="page-heading">
+        <div>
+          <span className="eyebrow">COACH COMMUNITY</span>
+          <h1>Public Library</h1>
+          <p>
+            Discover public workouts and reusable pieces shared by LaneLink
+            coaches.
+          </p>
+        </div>
+        <span className="public-library-count">
+          {total.toLocaleString()} public {type === "set" ? "sets" : "pieces"}
+        </span>
+      </section>
+
+      <div className="public-library-tabs" role="tablist">
+        <Button
+          variant={type === "set" ? "primary" : "secondary"}
+          onClick={() => setType("set")}
+        >
+          Full Sets
+        </Button>
+        <Button
+          variant={type === "piece" ? "primary" : "secondary"}
+          onClick={() => setType("piece")}
+        >
+          Set Pieces
+        </Button>
+      </div>
+
+      <section className="panel public-library-controls">
+        <label className="search-box">
+          <Icon name="search" />
+          <Field
+            value={query}
+            onChange={(value) => {
+              setQuery(value)
+              setPage(1)
+            }}
+            placeholder="Search names, descriptions, strokes, goals, or equipment..."
+          />
+        </label>
+        <div className="public-filter-grid">
+          <select
+            value={stroke}
+            onChange={(event) => setStroke(event.target.value)}
+          >
+            {publicStrokeOptions.map(([value, label]) => (
+              <option value={value} key={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <select
+            value={distance}
+            onChange={(event) => setDistance(event.target.value)}
+          >
+            <option value="">All distances</option>
+            {[25, 50, 75, 100, 200, 400, 500, 1000].map((value) => (
+              <option value={value} key={value}>
+                {value} per repeat
+              </option>
+            ))}
+          </select>
+          <select
+            value={goal}
+            onChange={(event) => setGoal(event.target.value)}
+          >
+            {publicGoalOptions.map(([value, label]) => (
+              <option value={value} key={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <select
+            value={equipment}
+            onChange={(event) => setEquipment(event.target.value)}
+          >
+            <option value="">All equipment</option>
+            {["board", "fins", "paddles", "pull buoy", "snorkel"].map(
+              (value) => (
+                <option value={value} key={value}>
+                  {value}
+                </option>
+              ),
+            )}
+          </select>
+          <select
+            value={sort}
+            onChange={(event) => setSort(event.target.value as typeof sort)}
+          >
+            <option value="newest">Newest first</option>
+            <option value="alphabetical">Name A–Z</option>
+          </select>
+        </div>
+      </section>
+
+      {error && (
+        <div className="inline-error public-library-error" role="alert">
+          <span>{error}</span>
+          <Button variant="secondary" onClick={load}>
+            Retry
+          </Button>
+        </div>
+      )}
+
+      {loading ? (
+        <div className="public-library-loading" role="status">
+          <span className="spinner" />
+          Searching the public library…
+        </div>
+      ) : items.length ? (
+        <>
+          <div className="public-library-grid">
+            {items.map((item) => {
+              const workout =
+                item.type === "set" ? item.content as Workout : null
+              const piece =
+                item.type === "piece" ? item.content as SetPiece : null
+              return (
+                <article className="public-library-card" key={item.id}>
+                  <div className="public-card-topline">
+                    {piece && item.category ? (
+                      <Badge category={item.category} />
+                    ) : (
+                      <span className="public-type-badge">Full set</span>
+                    )}
+                    {item.inCollection && (
+                      <span className="collection-status">
+                        <Icon name="check" size={13} />
+                        {item.isOwn ? "Your item" : "In collection"}
+                      </span>
+                    )}
+                  </div>
+                  <div className="public-card-copy">
+                    <h2>{item.name}</h2>
+                    <p>{item.description || "No description provided."}</p>
+                  </div>
+                  <div className="public-card-metrics">
+                    <span>
+                      <strong>{formatYards(publicItemDistance(item))}</strong>
+                      <small>Total distance</small>
+                    </span>
+                    <span>
+                      <strong>
+                        {workout
+                          ? pieceCount(workout)
+                          : `${piece?.repeats ?? 0} × ${piece?.distance ?? 0}`}
+                      </strong>
+                      <small>{workout ? "Set pieces" : "Set notation"}</small>
+                    </span>
+                    <span>
+                      <strong>
+                        {workout?.sections.length ??
+                          piece?.stroke ??
+                          item.category}
+                      </strong>
+                      <small>{workout ? "Sections" : "Stroke / type"}</small>
+                    </span>
+                  </div>
+                  {piece && (
+                    <div className="public-metadata">
+                      {piece.adaptiveInterval?.goal && (
+                        <span>{piece.adaptiveInterval.goal}</span>
+                      )}
+                      {piece.equipment?.map((item) => (
+                        <span key={item}>{item}</span>
+                      ))}
+                      {piece.rest && <span>{piece.rest}</span>}
+                    </div>
+                  )}
+                  <div className="public-creator">
+                    <div className="avatar">
+                      {initialsFor(item.creatorDisplayName)}
+                    </div>
+                    <div>
+                      <strong>{item.creatorDisplayName}</strong>
+                      <span>
+                        {item.creatorOrganization || "LaneLink Coach"}
+                      </span>
+                    </div>
+                    <small>
+                      {new Intl.DateTimeFormat(undefined, {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      }).format(new Date(item.createdAt))}
+                    </small>
+                  </div>
+                  <div className="public-card-actions">
+                    <Button
+                      variant={item.inCollection ? "secondary" : "primary"}
+                      icon={item.inCollection ? "check" : "plus"}
+                      disabled={item.isOwn || savingId === item.id}
+                      onClick={() => void toggleSaved(item)}
+                    >
+                      {savingId === item.id
+                        ? "Updating…"
+                        : item.isOwn
+                          ? "Already yours"
+                          : item.inCollection
+                            ? "Remove from My Collection"
+                            : "Add to My Collection"}
+                    </Button>
+                    {!item.isOwn && (
+                      <Button
+                        variant="secondary"
+                        icon="duplicate"
+                        disabled={pendingOperations.has(
+                          `duplicate-public-${item.type}:${item.id}`,
+                        )}
+                        onClick={() => void onDuplicate(item).catch(() => {})}
+                      >
+                        {pendingOperations.has(
+                          `duplicate-public-${item.type}:${item.id}`,
+                        )
+                          ? "Duplicating…"
+                          : `Duplicate to My ${
+                              item.type === "set" ? "Sets" : "Pieces"
+                            }`}
+                      </Button>
+                    )}
+                  </div>
+                </article>
+              )
+            })}
+          </div>
+          <div className="public-pagination">
+            <span>
+              Showing {(page - 1) * pageSize + 1}–
+              {Math.min(page * pageSize, total)} of {total}
+            </span>
+            <div>
+              <Button
+                variant="secondary"
+                disabled={page === 1}
+                onClick={() => setPage((value) => Math.max(1, value - 1))}
+              >
+                Previous
+              </Button>
+              <span>
+                Page {page} of {pageCount}
+              </span>
+              <Button
+                variant="secondary"
+                disabled={page >= pageCount}
+                onClick={() => setPage((value) => value + 1)}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
+        </>
+      ) : (
+        <div className="empty-state">
+          <span>
+            <Icon name="search" size={28} />
+          </span>
+          <h2>No public {type === "set" ? "sets" : "pieces"} found</h2>
+          <p>Try clearing a filter or searching for a broader training term.</p>
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setQuery("")
+              setStroke("")
+              setDistance("")
+              setGoal("")
+              setEquipment("")
+              setSort("newest")
+            }}
+          >
+            Clear filters
+          </Button>
         </div>
       )}
     </div>

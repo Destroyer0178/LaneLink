@@ -2,7 +2,7 @@ begin;
 
 create extension if not exists pgtap;
 
-select plan(30);
+select plan(39);
 
 create schema if not exists tests;
 
@@ -111,7 +111,7 @@ values
     'Coach A Public Piece',
     'Main Set',
     'public',
-    '{"id":"public-piece","name":"Public","category":"Main Set","instructions":"4 x 100","repeats":4,"distance":100}'::jsonb
+    '{"id":"public-piece","name":"Public Circuit","category":"Main Set","instructions":"2 rounds","repeats":1,"distance":0,"kind":"circuit","rounds":2,"restBetweenPieces":"10 seconds","restBetweenRounds":"30 seconds","children":[{"id":"child-piece","name":"Threshold 100s","category":"Main Set","instructions":"4 x 100","repeats":4,"distance":100,"rest":"@ 1:20","adaptiveInterval":{"enabled":true,"goal":"threshold","desiredRestSeconds":15,"groupCount":2}}]}'::jsonb
   );
 
 insert into public.swimmers (
@@ -266,6 +266,30 @@ select results_eq(
 );
 
 select results_eq(
+  $$select count(*)::integer from public.search_public_library('set', '', '', null, '', '', 'newest', 12, 0)$$,
+  array[1],
+  'public library search returns the other coach public set only'
+);
+
+select results_eq(
+  $$select count(*)::integer from public.search_public_library('set', 'Private Set', '', null, '', '', 'newest', 12, 0)$$,
+  array[0],
+  'public library search cannot find another coach private set'
+);
+
+select results_eq(
+  $$select count(*)::integer from public.search_public_library('piece', 'Public Piece', '', 100, '', '', 'alphabetical', 12, 0)$$,
+  array[1],
+  'public library search filters public piece metadata'
+);
+
+select results_eq(
+  $$select creator_display_name from public.search_public_library('piece', 'Public Piece', '', null, '', '', 'newest', 12, 0)$$,
+  array['Coach A'::text],
+  'public library exposes the creator display name from the safe profile view'
+);
+
+select results_eq(
   $$with changed as (
       update public.sets
       set name = 'unauthorized'
@@ -300,6 +324,46 @@ select ok(
     $$insert into public.saved_pieces (coach_id, piece_id) values ('00000000-0000-0000-0000-0000000000b2', '20000000-0000-0000-0000-000000000002')$$
   ),
   'a coach can save a public piece'
+);
+
+select ok(
+  not tests.try_sql(
+    $$insert into public.saved_sets (coach_id, set_id) values ('00000000-0000-0000-0000-0000000000b2', '10000000-0000-0000-0000-000000000002')$$
+  ),
+  'the saved collection primary key prevents duplicate saves'
+);
+
+select results_eq(
+  $$select duplicate_public_library_item('set', '10000000-0000-0000-0000-000000000002') ->> 'visibility'$$,
+  array['private'::text],
+  'duplicating a public set creates a private independent copy'
+);
+
+select results_eq(
+  $$select count(*)::integer from public.sets where owner_id = '00000000-0000-0000-0000-0000000000b2' and source_set_id = '10000000-0000-0000-0000-000000000002' and structure = '{"sections":[]}'::jsonb$$,
+  array[1],
+  'the duplicate belongs to the new coach and preserves the complete structure'
+);
+
+select results_eq(
+  $$select source_creator_display_name from public.sets where owner_id = '00000000-0000-0000-0000-0000000000b2' and source_set_id = '10000000-0000-0000-0000-000000000002'$$,
+  array['Coach A'::text],
+  'the independent duplicate retains creator attribution'
+);
+
+select results_eq(
+  $$with copied as (
+      select public.duplicate_public_library_item(
+        'piece',
+        '20000000-0000-0000-0000-000000000002'
+      ) as item
+    )
+    select (copied.item -> 'structure') = source.structure
+    from copied
+    cross join public.set_pieces source
+    where source.id = '20000000-0000-0000-0000-000000000002'$$,
+  array[true],
+  'duplicating a nested circuit preserves rounds, rests, intervals, children, and yardage inputs exactly'
 );
 
 select ok(

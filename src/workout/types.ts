@@ -89,6 +89,9 @@ export type SetPiece = {
   adaptiveInterval?: AdaptiveIntervalConfig
   sourceText?: string
   normalizedText?: string
+  visibility?: "private" | "public"
+  sourceCreatorDisplayName?: string
+  sourceCreatorOrganization?: string
 }
 
 export type WorkoutSection = {
@@ -105,4 +108,7 @@ export type Workout = {
   modified: string
   sections: WorkoutSection[]
   adaptiveIntervalsEnabled?: boolean
+  visibility?: "private" | "public"
+  sourceCreatorDisplayName?: string
+  sourceCreatorOrganization?: string
 }
