@@ -45,6 +45,15 @@ import {
   resolvedYardageOrZero,
 } from "./workout/yardage"
 import { AdaptiveIntervalsModal } from "./workout/AdaptiveIntervalsModal"
+import {
+  calculatePieceDuration,
+  calculateSectionDuration,
+  calculateWorkoutDuration,
+  durationLabel,
+  evaluateTargetDuration,
+  formatDuration,
+  parseDurationSeconds,
+} from "./workout/duration"
 import { recommendIntervals } from "./workout/intervals"
 import { circuitPrintLines, intervalGroupsForPrint } from "./workout/print"
 
@@ -161,6 +170,11 @@ const formatYards = (value: number) => `${value.toLocaleString()} yd`
 const pieceYardageLabel = (piece: SetPiece) => {
   const result = calculatePieceYardage(piece)
   return result.status === "resolved" ? formatYards(result.yards) : "Unresolved"
+}
+const durationInputValue = (seconds?: number) => {
+  if (!seconds) return ""
+  const minutes = Math.floor(seconds / 60)
+  return `${minutes}:${String(Math.round(seconds % 60)).padStart(2, "0")}`
 }
 const todayWithDay = () =>
   new Intl.DateTimeFormat(undefined, {
@@ -1415,6 +1429,11 @@ function Builder({
         .toLowerCase()
         .includes(search.toLowerCase()),
   )
+  const workoutDuration = calculateWorkoutDuration(current)
+  const targetStatus = evaluateTargetDuration(
+    workoutDuration,
+    current.targetDurationMinutes,
+  )
   const addPiece = (piece: SetPiece) => {
     const targetIndex = Math.max(
       0,
@@ -1599,6 +1618,25 @@ function Builder({
               setCurrent({ ...current, description: event.target.value })
             }
           />
+          <label className="target-duration-field">
+            <span>Target workout time</span>
+            <span>
+              <Field
+                type="number"
+                value={current.targetDurationMinutes ?? ""}
+                onChange={(value) =>
+                  setCurrent({
+                    ...current,
+                    targetDurationMinutes: value
+                      ? Math.max(1, Number(value))
+                      : undefined,
+                  })
+                }
+                placeholder="No target"
+              />
+              <small>minutes</small>
+            </span>
+          </label>
         </div>
         <div className="builder-actions">
           <label className="builder-adaptive-toggle">
@@ -1710,6 +1748,7 @@ function Builder({
                     {piece.repeats} × {piece.distance}
                   </span>
                   {piece.rest && <span>{piece.rest}</span>}
+                  <span>{durationLabel(calculatePieceDuration(piece))}</span>
                 </div>
                 <Button
                   variant="secondary"
@@ -1730,11 +1769,46 @@ function Builder({
                 {workoutYardage(current).toLocaleString()} <small>yards</small>
               </strong>
             </div>
+            <div className="workout-duration-total">
+              <span>Estimated duration</span>
+              <strong>{durationLabel(workoutDuration)}</strong>
+            </div>
             <div className="summary-meta">
               <span>{current.sections.length} sections</span>
               <span>{pieceCount(current)} pieces</span>
             </div>
           </div>
+          {targetStatus.status === "over" && (
+            <div className="duration-goal-message over" role="alert">
+              <Icon name="alert" size={17} />
+              <div>
+                <strong>Workout exceeds the target</strong>
+                <span>
+                  Adjust the workout to remove{" "}
+                  {formatDuration(targetStatus.differenceSeconds)} from the
+                  estimated duration.
+                </span>
+              </div>
+            </div>
+          )}
+          {targetStatus.status === "within" && (
+            <div className="duration-goal-message within" role="status">
+              <Icon name="check" size={17} />
+              <span>
+                Within target by{" "}
+                {formatDuration(targetStatus.differenceSeconds)}.
+              </span>
+            </div>
+          )}
+          {targetStatus.status === "incomplete" && (
+            <div className="duration-goal-message incomplete" role="status">
+              <Icon name="alert" size={17} />
+              <span>
+                Add send-offs or durations to incomplete pieces before comparing
+                this workout with its target.
+              </span>
+            </div>
+          )}
           <div className="section-stack">
             {current.sections.map((section) => (
               <article
@@ -1771,6 +1845,9 @@ function Builder({
                     <span>{section.pieces.length} pieces</span>
                   </div>
                   <div className="section-header-actions">
+                    <span className="section-duration">
+                      {durationLabel(calculateSectionDuration(section))}
+                    </span>
                     <strong>{formatYards(sectionYardage(section))}</strong>
                     <button
                       className="delete-section-button"
@@ -1852,7 +1929,10 @@ function Builder({
                               {piece.children?.map((child) => (
                                 <div key={child.id}>
                                   <span>
-                                    {child.name} · {pieceYardageLabel(child)}
+                                    {child.name} · {pieceYardageLabel(child)} ·{" "}
+                                    {durationLabel(
+                                      calculatePieceDuration(child),
+                                    )}
                                   </span>
                                   <button
                                     onClick={() =>
@@ -1872,9 +1952,12 @@ function Builder({
                             </div>
                           )}
                         </div>
-                        <strong className="piece-yards">
-                          {formatYards(yardage(piece))}
-                        </strong>
+                        <div className="piece-totals">
+                          <strong>{formatYards(yardage(piece))}</strong>
+                          <span>
+                            {durationLabel(calculatePieceDuration(piece))}
+                          </span>
+                        </div>
                         <div className="piece-actions">
                           <button
                             title="Move up"
@@ -1998,6 +2081,9 @@ function PieceModal({
   const [saveToLibrary, setSaveToLibrary] = useState(
     modal.libraryOnly ?? !modal.piece,
   )
+  const [explicitDurationText, setExplicitDurationText] = useState(
+    durationInputValue(modal.piece?.explicitDurationSeconds),
+  )
   const [selectedCircuitPiece, setSelectedCircuitPiece] = useState(
     pieces[0]?.id ?? "",
   )
@@ -2007,6 +2093,7 @@ function PieceModal({
   const isCircuit = draft.kind === "circuit"
   const circuitYardage = calculateCircuitYardage(draft)
   const draftYardage = calculatePieceYardage(draft)
+  const draftDuration = calculatePieceDuration(draft)
   const save = async () => {
     if (!draft.name.trim()) return
     if (isCircuit && !draft.children?.length) return
@@ -2289,7 +2376,9 @@ function PieceModal({
                     <span>Reps</span>
                     <span />
                     <span>Distance</span>
+                    <span>Send-off</span>
                     <span>Yardage</span>
+                    <span>Duration</span>
                     <span>Actions</span>
                   </div>
                 )}
@@ -2344,7 +2433,22 @@ function PieceModal({
                         })
                       }
                     />
+                    <Field
+                      value={child.rest ?? ""}
+                      onChange={(rest) =>
+                        setDraft({
+                          ...draft,
+                          children: draft.children?.map((item) =>
+                            item.id === child.id ? { ...item, rest } : item,
+                          ),
+                        })
+                      }
+                      placeholder="@ 1:30"
+                    />
                     <strong>{pieceYardageLabel(child)}</strong>
+                    <strong>
+                      {durationLabel(calculatePieceDuration(child))}
+                    </strong>
                     <button
                       title="Move up"
                       onClick={() => {
@@ -2446,6 +2550,10 @@ function PieceModal({
                   </strong>{" "}
                   total
                 </span>
+                <span>
+                  <strong>{durationLabel(draftDuration)}</strong>
+                  duration
+                </span>
               </div>
             </div>
           )}
@@ -2539,12 +2647,34 @@ function PieceModal({
                 </select>
               </label>
               <label className="form-label">
-                <span>Rest / interval</span>
+                <span>Send-off interval</span>
                 <Field
                   value={draft.rest ?? ""}
                   onChange={(rest) => setDraft({ ...draft, rest })}
                   placeholder="@ 1:30"
                 />
+                <small>
+                  Includes swim time and rest before the next repeat.
+                </small>
+              </label>
+              <label className="form-label">
+                <span>
+                  Explicit total duration <em>Optional</em>
+                </span>
+                <Field
+                  value={explicitDurationText}
+                  onChange={(value) => {
+                    setExplicitDurationText(value)
+                    const seconds = parseDurationSeconds(value)
+                    setDraft({
+                      ...draft,
+                      explicitDurationSeconds:
+                        value.trim() && seconds ? seconds : undefined,
+                    })
+                  }}
+                  placeholder="e.g. 8:00"
+                />
+                <small>Used only when no send-off is defined.</small>
               </label>
             </div>
           )}
@@ -2574,6 +2704,16 @@ function PieceModal({
                 ? formatYards(draftYardage.yards)
                 : "Unresolved"}
             </strong>
+          </div>
+          <div className="calculation duration-calculation">
+            <div>
+              <span>Estimated duration</span>
+              <small>
+                Send-off × repetitions is used first. Explicit duration is a
+                fallback.
+              </small>
+            </div>
+            <strong>{durationLabel(draftDuration)}</strong>
           </div>
           {!modal.libraryOnly && (
             <label className="toggle-row">
@@ -2777,6 +2917,9 @@ function WorkoutsPage({
               <span>{workout.modified}</span>
               <span className="yardage-hover">
                 <strong>{formatYards(workoutYardage(workout))}</strong>
+                <small className="table-duration">
+                  {durationLabel(calculateWorkoutDuration(workout))}
+                </small>
                 <div className="yardage-tooltip">
                   <span className="eyebrow">WORKOUT BREAKDOWN</span>
                   <strong>{formatYards(workoutYardage(workout))} total</strong>
@@ -3022,6 +3165,9 @@ function LibraryPage({
                 {piece.rest && <span>{piece.rest}</span>}
                 <strong>{formatYards(yardage(piece))}</strong>
               </div>
+              <span className="library-duration">
+                {durationLabel(calculatePieceDuration(piece))}
+              </span>
               <div className="library-card-actions">
                 <Button variant="secondary" onClick={startNew}>
                   Use in Workout
@@ -3395,6 +3541,16 @@ function PublicLibraryPage({
                           item.category}
                       </strong>
                       <small>{workout ? "Sections" : "Stroke / type"}</small>
+                    </span>
+                    <span>
+                      <strong>
+                        {durationLabel(
+                          item.type === "set"
+                            ? calculateWorkoutDuration(item.content as Workout)
+                            : calculatePieceDuration(item.content as SetPiece),
+                        )}
+                      </strong>
+                      <small>Duration</small>
                     </span>
                   </div>
                   {piece && (
@@ -4609,6 +4765,7 @@ function Preview({
   const [intervalDisplay, setIntervalDisplay] =
     useState<"all" | "selected" | "compact" | "none">("compact")
   const [selectedGroupIndex, setSelectedGroupIndex] = useState(0)
+  const workoutDuration = calculateWorkoutDuration(workout)
   const print = () => {
     showNotice("PDF export ready")
     window.setTimeout(() => window.print(), 300)
@@ -4686,6 +4843,9 @@ function Preview({
               <span>Total yardage</span>
               <strong>{workoutYardage(workout).toLocaleString()}</strong>
               <small>YARDS</small>
+              <span className="paper-duration">
+                {durationLabel(workoutDuration)}
+              </span>
             </div>
           </div>
           <div className="paper-sections">
@@ -4694,7 +4854,10 @@ function Preview({
                 <header>
                   <span>{String(sectionIndex + 1).padStart(2, "0")}</span>
                   <h2>{section.name}</h2>
-                  <strong>{formatYards(sectionYardage(section))}</strong>
+                  <strong>
+                    {formatYards(sectionYardage(section))} ·{" "}
+                    {durationLabel(calculateSectionDuration(section))}
+                  </strong>
                 </header>
                 {section.pieces.length ? (
                   section.pieces.map((piece, index) => (
@@ -4763,7 +4926,12 @@ function Preview({
                           )}
                         {piece.notes && <em>Coach note: {piece.notes}</em>}
                       </div>
-                      <strong>{formatYards(yardage(piece))}</strong>
+                      <strong>
+                        {formatYards(yardage(piece))}
+                        <small>
+                          {durationLabel(calculatePieceDuration(piece))}
+                        </small>
+                      </strong>
                     </div>
                   ))
                 ) : (

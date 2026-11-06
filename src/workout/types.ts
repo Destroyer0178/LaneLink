@@ -92,6 +92,8 @@ export type SetPiece = {
   visibility?: "private" | "public"
   sourceCreatorDisplayName?: string
   sourceCreatorOrganization?: string
+  explicitDurationSeconds?: number
+  estimatedDurationSeconds?: number
 }
 
 export type WorkoutSection = {
@@ -111,4 +113,5 @@ export type Workout = {
   visibility?: "private" | "public"
   sourceCreatorDisplayName?: string
   sourceCreatorOrganization?: string
+  targetDurationMinutes?: number
 }

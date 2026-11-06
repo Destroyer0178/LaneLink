@@ -60,6 +60,9 @@ the Supabase SQL editor:
 4. `202505210004_row_level_security.sql`
 5. `202505210005_rls_hardening.sql`
 6. `202505210006_auth_profile_metadata.sql`
+7. `202505210007_public_library.sql`
+8. `202505210008_sharing_workflows.sql`
+9. `202505210009_public_sharing_reliability.sql`
 
 ## Row Level Security
 
@@ -96,10 +99,11 @@ supabase db reset
 supabase test db
 ```
 
-The test transaction verifies owner access, public reads, private-ID
-protection, owner spoofing prevention, cross-coach write protection, profile
-field exposure, saved relationship ownership, adaptive-record privacy, and
-public-to-private cleanup.
+The test transaction verifies owner access, cross-coach public discovery,
+legacy profile fallback, private-ID protection, owner spoofing prevention,
+cross-coach write protection, profile field exposure, saved relationship
+ownership, independent copy isolation, nested circuit preservation,
+adaptive-record privacy, and public-to-private cleanup.
 
 ## Preserving existing LaneLink data
 
@@ -136,3 +140,18 @@ pnpm test src/data/contentRepository.live.test.ts
 The test is skipped unless the public Supabase environment variables and both
 test-account variables are available. It uses the public client and the signed
 in test user, never a service-role key.
+
+Cross-coach public sharing coverage additionally uses two disposable accounts:
+
+```sh
+SUPABASE_TEST_EMAIL=creator@example.com \
+SUPABASE_TEST_PASSWORD='creator-password' \
+SUPABASE_SECOND_TEST_EMAIL=collector@example.com \
+SUPABASE_SECOND_TEST_PASSWORD='collector-password' \
+pnpm test src/data/contentRepository.live.test.ts
+```
+
+The two-account test publishes nested content, verifies cross-coach discovery
+and session restoration, exercises duplicate-save handling and reference
+removal, creates independent copies, rejects source edits/deletes by the second
+coach, and verifies the creator's original remains unchanged.

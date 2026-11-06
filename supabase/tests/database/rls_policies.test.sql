@@ -2,7 +2,7 @@ begin;
 
 create extension if not exists pgtap;
 
-select plan(39);
+select plan(43);
 
 create schema if not exists tests;
 
@@ -289,6 +289,45 @@ select results_eq(
   'public library exposes the creator display name from the safe profile view'
 );
 
+set local role postgres;
+
+delete from public.profiles
+where id = '00000000-0000-0000-0000-0000000000a1';
+
+set local role authenticated;
+select set_config(
+  'request.jwt.claims',
+  '{"sub":"00000000-0000-0000-0000-0000000000b2","role":"authenticated"}',
+  true
+);
+
+select results_eq(
+  $$select count(*)::integer from public.search_public_library('set', 'Public Set', '', null, '', '', 'newest', 12, 0)$$,
+  array[1],
+  'public discovery does not hide another coach public item when a legacy profile row is missing'
+);
+
+select results_eq(
+  $$select creator_display_name from public.search_public_library('set', 'Public Set', '', null, '', '', 'newest', 12, 0)$$,
+  array['LaneLink Coach'::text],
+  'public discovery uses safe fallback attribution for a missing profile'
+);
+
+set local role postgres;
+
+insert into public.profiles (id, display_name)
+values (
+  '00000000-0000-0000-0000-0000000000a1',
+  'Coach A'
+);
+
+set local role authenticated;
+select set_config(
+  'request.jwt.claims',
+  '{"sub":"00000000-0000-0000-0000-0000000000b2","role":"authenticated"}',
+  true
+);
+
 select results_eq(
   $$with changed as (
       update public.sets
@@ -410,6 +449,12 @@ select results_eq(
   'a coach can remove their own saved set relationship'
 );
 
+select results_eq(
+  $$select count(*)::integer from public.sets where id = '10000000-0000-0000-0000-000000000002'$$,
+  array[1],
+  'removing a saved reference does not delete the original public set'
+);
+
 insert into public.saved_sets (coach_id, set_id)
 values (
   '00000000-0000-0000-0000-0000000000b2',
@@ -426,6 +471,22 @@ select results_eq(
     select count(*)::integer from removed$$,
   array[1],
   'a coach can remove their own saved piece relationship'
+);
+
+select results_eq(
+  $$with changed as (
+      update public.sets
+      set name = 'Coach B Independent Edit'
+      where owner_id = '00000000-0000-0000-0000-0000000000b2'
+        and source_set_id = '10000000-0000-0000-0000-000000000002'
+      returning 1
+    )
+    select count(*)::integer
+    from public.sets
+    where id = '10000000-0000-0000-0000-000000000002'
+      and name = 'Coach A Public Set'$$,
+  array[1],
+  'editing an independent copy does not modify the original'
 );
 
 insert into public.saved_pieces (coach_id, piece_id)
